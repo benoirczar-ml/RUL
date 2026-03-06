@@ -100,6 +100,26 @@ python train_hybrid_sequence.py \
 ```
 Epokowe logi (1 linia na epoke): `--log-every-epoch` (wylaczenie: `--no-log-every-epoch`)
 
+## Trening hybrydowy multi-FD (jeden model na FD001..FD004)
+```bash
+python train_hybrid_multifd.py
+```
+To trenuje wspolny backbone na wszystkich podzbiorach jednoczesnie i uzywa `FD-specific head`.
+Wyniki walidacji sa raportowane globalnie i per-FD.
+Wersja v2 dodatkowo:
+- `sampling_strategy=balanced_fd_failure` (balans FD + nacisk na niskie RUL),
+- `warmup_mse_epochs` (2-stage: start na MSE, potem asymetryczny Huber).
+
+Przyklad:
+```bash
+python train_hybrid_multifd.py \
+  --fds FD001,FD002,FD003,FD004 \
+  --epochs 10 \
+  --sample-step 1 \
+  --device cuda \
+  --model-dir models/caelstm_multifd_v1
+```
+
 ## Predykcja testu
 1. Wybierz katalog modelu, np. `models/hist_gbr_FD001_YYYYMMDD_HHMMSS`
 ```bash

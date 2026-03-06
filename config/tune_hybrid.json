@@ -22,6 +22,9 @@
     "emphasize_failure": [true],
     "failure_rul_threshold": [30],
     "failure_weight": [2.0],
+    "sampling_strategy": ["auto"],
+    "fd_balance_power": [1.0],
+    "warmup_mse_epochs": [1],
     "learning_rate": [0.001],
     "weight_decay": [1e-05],
     "log_every_epoch": [true]

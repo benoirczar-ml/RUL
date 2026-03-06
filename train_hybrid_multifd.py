@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
@@ -24,8 +25,6 @@ from rul_pipeline.io_utils import ensure_dir, read_json, write_json
 from rul_pipeline.metrics import mae, phm_score, rmse
 from rul_pipeline.sequence import apply_window_standardizer, build_sequence_samples, fit_window_standardizer
 
-FD_INDEX_MAP = {"FD001": 0, "FD002": 1, "FD003": 2, "FD004": 3}
-
 
 def _resolve(path_arg: str | None) -> Path | None:
     if path_arg is None:
@@ -39,13 +38,44 @@ def _pick(cli_value, config_dict: dict, key: str, default):
     return config_dict.get(key, default)
 
 
+def _parse_fds(raw: str | list[str] | None) -> list[str]:
+    if raw is None:
+        fds = ["FD001", "FD002", "FD003", "FD004"]
+    elif isinstance(raw, str):
+        fds = [x.strip().upper() for x in raw.split(",") if x.strip()]
+    else:
+        fds = [str(x).strip().upper() for x in raw if str(x).strip()]
+    valid = {"FD001", "FD002", "FD003", "FD004"}
+    for fd in fds:
+        if fd not in valid:
+            raise ValueError(f"Unsupported FD={fd}. Allowed: {sorted(valid)}")
+    if not fds:
+        raise ValueError("fds cannot be empty.")
+    # keep order, unique
+    out: list[str] = []
+    seen = set()
+    for fd in fds:
+        if fd not in seen:
+            seen.add(fd)
+            out.append(fd)
+    return out
+
+
+def _augment_with_fd(df: pd.DataFrame, fd: str, fd_index: int) -> pd.DataFrame:
+    out = df.copy()
+    out["fd"] = fd
+    out["fd_index"] = int(fd_index)
+    out["unit_gid"] = out["unit"].astype(int) + int(fd_index) * 100000
+    return out
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train C-MAPSS Conv+Attention+LSTM sequence regressor.")
-    parser.add_argument("--config", default="config/train_hybrid.json", help="JSON config path.")
+    parser = argparse.ArgumentParser(description="Train one Conv+Attention+LSTM model jointly on multiple FD subsets.")
+    parser.add_argument("--config", default="config/train_hybrid_multifd.json", help="JSON config path.")
     parser.add_argument("--data-dir", default=None, help="Path to CMAPSSData directory.")
-    parser.add_argument("--fd", default=None, help="Dataset id: FD001..FD004.")
+    parser.add_argument("--fds", default=None, help="Comma-separated FD list, e.g. FD001,FD002,FD003,FD004.")
     parser.add_argument("--max-rul", type=int, default=None, help="Clip train RUL target.")
-    parser.add_argument("--val-fraction", type=float, default=None, help="Validation unit split fraction.")
+    parser.add_argument("--val-fraction", type=float, default=None, help="Validation unit split fraction per FD.")
     parser.add_argument("--seed", type=int, default=None, help="Random seed.")
     parser.add_argument("--seq-len", type=int, default=None, help="Window length.")
     parser.add_argument("--sample-step", type=int, default=None, help="Training window stride.")
@@ -125,16 +155,34 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _metrics_by_fd(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    fd_idx: np.ndarray,
+    fd_index_map: dict[str, int],
+) -> dict[str, dict[str, float]]:
+    out: dict[str, dict[str, float]] = {}
+    for fd, idx in fd_index_map.items():
+        mask = fd_idx == idx
+        if mask.sum() == 0:
+            continue
+        out[fd] = {
+            "n_units": int(mask.sum()),
+            "rmse": rmse(y_true[mask], y_pred[mask]),
+            "mae": mae(y_true[mask], y_pred[mask]),
+            "phm_score": phm_score(y_true[mask], y_pred[mask]),
+        }
+    return out
+
+
 def main() -> None:
     args = parse_args()
     cfg_path = _resolve(args.config)
     cfg_data = read_json(cfg_path) if cfg_path and cfg_path.exists() else {}
 
     data_dir = _pick(args.data_dir, cfg_data, "data_dir", "RULdata/CMAPSSData")
-    fd = str(_pick(args.fd, cfg_data, "fd", "FD001")).upper()
-    if fd not in FD_INDEX_MAP:
-        raise ValueError(f"Unsupported fd={fd}. Expected one of {sorted(FD_INDEX_MAP)}.")
-    fd_index = FD_INDEX_MAP[fd]
+    fds = _parse_fds(_pick(args.fds, cfg_data, "fds", ["FD001", "FD002", "FD003", "FD004"]))
+    fd_index_map = {fd: i for i, fd in enumerate(fds)}
     max_rul = int(_pick(args.max_rul, cfg_data, "max_rul", 125))
     val_fraction = float(_pick(args.val_fraction, cfg_data, "val_fraction", 0.2))
     seed = int(_pick(args.seed, cfg_data, "seed", 42))
@@ -144,84 +192,127 @@ def main() -> None:
     val_strategy = str(_pick(args.val_strategy, cfg_data, "val_strategy", "truncation"))
     val_min_prefix = int(_pick(args.val_min_prefix, cfg_data, "val_min_prefix", 20))
 
-    train_raw = load_split(_resolve(data_dir), fd_id=fd, split="train")
-    train_with_target = add_train_rul(train_raw, max_rul=max_rul)
+    train_parts: list[pd.DataFrame] = []
+    valid_full_parts: list[pd.DataFrame] = []
+    valid_eval_parts: list[pd.DataFrame] = []
+    cuts_parts: list[pd.DataFrame] = []
+    rows_by_fd: dict[str, dict[str, int]] = {}
 
-    units = train_with_target["unit"].drop_duplicates().to_numpy()
-    rng = np.random.default_rng(seed)
-    rng.shuffle(units)
-    n_val = max(1, int(len(units) * val_fraction))
-    val_units = set(units[:n_val])
-    train_units = set(units[n_val:])
-    if not train_units:
-        raise ValueError("Validation split consumed all units. Lower --val-fraction.")
+    for fd in fds:
+        fd_idx = fd_index_map[fd]
+        train_raw = load_split(_resolve(data_dir), fd_id=fd, split="train")
+        train_with_target = add_train_rul(train_raw, max_rul=max_rul)
 
-    train_df = train_with_target[train_with_target["unit"].isin(train_units)].sort_values(["unit", "cycle"]).reset_index(
-        drop=True
-    )
-    valid_df_full = train_with_target[train_with_target["unit"].isin(val_units)].sort_values(["unit", "cycle"]).reset_index(
-        drop=True
-    )
+        units = train_with_target["unit"].drop_duplicates().to_numpy()
+        rng = np.random.default_rng(seed + fd_idx * 17)
+        rng.shuffle(units)
+        n_val = max(1, int(len(units) * val_fraction))
+        val_units = set(units[:n_val])
+        train_units = set(units[n_val:])
+        if not train_units:
+            raise ValueError(f"Validation split consumed all units for {fd}. Lower --val-fraction.")
 
-    if val_strategy == "truncation":
-        valid_df_eval, valid_cuts = build_truncated_validation(
-            valid_df_full,
-            min_prefix_cycles=val_min_prefix,
-            random_state=seed,
+        train_fd = train_with_target[train_with_target["unit"].isin(train_units)].sort_values(["unit", "cycle"]).reset_index(
+            drop=True
         )
-    elif val_strategy == "last_cycle":
-        valid_df_eval = valid_df_full.copy()
-        valid_cuts = None
-    else:
-        raise ValueError(f"Unsupported val_strategy={val_strategy}")
+        valid_full_fd = train_with_target[train_with_target["unit"].isin(val_units)].sort_values(["unit", "cycle"]).reset_index(
+            drop=True
+        )
+
+        if val_strategy == "truncation":
+            valid_eval_fd, cuts_fd = build_truncated_validation(
+                valid_full_fd,
+                min_prefix_cycles=val_min_prefix,
+                random_state=seed + fd_idx * 31,
+            )
+            cuts_fd["fd"] = fd
+        elif val_strategy == "last_cycle":
+            valid_eval_fd = valid_full_fd.copy()
+            cuts_fd = pd.DataFrame(columns=["unit", "cut_cycle", "max_cycle", "observed_cycles", "true_rul_at_cut", "fd"])
+        else:
+            raise ValueError(f"Unsupported val_strategy={val_strategy}")
+
+        train_fd = _augment_with_fd(train_fd, fd=fd, fd_index=fd_idx)
+        valid_full_fd = _augment_with_fd(valid_full_fd, fd=fd, fd_index=fd_idx)
+        valid_eval_fd = _augment_with_fd(valid_eval_fd, fd=fd, fd_index=fd_idx)
+
+        if len(cuts_fd):
+            cuts_parts.append(cuts_fd)
+        train_parts.append(train_fd)
+        valid_full_parts.append(valid_full_fd)
+        valid_eval_parts.append(valid_eval_fd)
+        rows_by_fd[fd] = {
+            "train_rows": int(len(train_fd)),
+            "valid_rows": int(len(valid_full_fd)),
+            "valid_eval_rows": int(len(valid_eval_fd)),
+            "train_units": int(len(train_units)),
+            "valid_units": int(len(val_units)),
+        }
+
+    train_df = pd.concat(train_parts, ignore_index=True).sort_values(["fd_index", "unit", "cycle"]).reset_index(drop=True)
+    valid_df_full = (
+        pd.concat(valid_full_parts, ignore_index=True).sort_values(["fd_index", "unit", "cycle"]).reset_index(drop=True)
+    )
+    valid_df_eval = (
+        pd.concat(valid_eval_parts, ignore_index=True).sort_values(["fd_index", "unit", "cycle"]).reset_index(drop=True)
+    )
+    valid_cuts = (
+        pd.concat(cuts_parts, ignore_index=True).sort_values(["fd", "unit"]).reset_index(drop=True)
+        if cuts_parts
+        else pd.DataFrame()
+    )
 
     x_train_tab = build_features(train_df)
     x_valid_eval_tab = build_features(valid_df_eval)
     x_valid_full_tab = build_features(valid_df_full)
     feat_cols = feature_columns()
 
-    x_train_seq, y_train_seq, _ = build_sequence_samples(
+    x_train_seq, y_train_seq, train_unit_seq = build_sequence_samples(
         x_train_tab[feat_cols],
-        units=train_df["unit"].to_numpy(),
+        units=train_df["unit_gid"].to_numpy(),
         targets=train_df["rul"].to_numpy(),
         seq_len=seq_len,
         sample_step=sample_step,
         last_only=False,
     )
-    x_valid_eval_seq, y_valid_eval_seq, _ = build_sequence_samples(
+    x_valid_eval_last_seq, y_valid_eval_last_seq, valid_eval_last_unit_seq = build_sequence_samples(
         x_valid_eval_tab[feat_cols],
-        units=valid_df_eval["unit"].to_numpy(),
-        targets=valid_df_eval["rul"].to_numpy(),
-        seq_len=seq_len,
-        sample_step=1,
-        last_only=False,
-    )
-    x_valid_eval_last_seq, y_valid_eval_last_seq, _ = build_sequence_samples(
-        x_valid_eval_tab[feat_cols],
-        units=valid_df_eval["unit"].to_numpy(),
+        units=valid_df_eval["unit_gid"].to_numpy(),
         targets=valid_df_eval["rul"].to_numpy(),
         seq_len=seq_len,
         sample_step=1,
         last_only=True,
     )
-    x_valid_full_last_seq, y_valid_full_last_seq, _ = build_sequence_samples(
+    x_valid_full_last_seq, y_valid_full_last_seq, valid_full_last_unit_seq = build_sequence_samples(
         x_valid_full_tab[feat_cols],
-        units=valid_df_full["unit"].to_numpy(),
+        units=valid_df_full["unit_gid"].to_numpy(),
         targets=valid_df_full["rul"].to_numpy(),
         seq_len=seq_len,
         sample_step=1,
         last_only=True,
     )
 
+    unit_to_fd_idx = (
+        pd.concat(
+            [
+                train_df[["unit_gid", "fd_index"]],
+                valid_df_eval[["unit_gid", "fd_index"]],
+                valid_df_full[["unit_gid", "fd_index"]],
+            ],
+            ignore_index=True,
+        )
+        .drop_duplicates(subset=["unit_gid"])
+        .set_index("unit_gid")["fd_index"]
+        .to_dict()
+    )
+    fd_train_idx = np.asarray([unit_to_fd_idx[int(u)] for u in train_unit_seq], dtype=np.int64)
+    fd_valid_eval_last_idx = np.asarray([unit_to_fd_idx[int(u)] for u in valid_eval_last_unit_seq], dtype=np.int64)
+    fd_valid_full_last_idx = np.asarray([unit_to_fd_idx[int(u)] for u in valid_full_last_unit_seq], dtype=np.int64)
+
     mean, std = fit_window_standardizer(x_train_seq)
     x_train_seq = apply_window_standardizer(x_train_seq, mean, std)
-    x_valid_eval_seq = apply_window_standardizer(x_valid_eval_seq, mean, std)
     x_valid_eval_last_seq = apply_window_standardizer(x_valid_eval_last_seq, mean, std)
     x_valid_full_last_seq = apply_window_standardizer(x_valid_full_last_seq, mean, std)
-
-    fd_train_idx = np.full(len(x_train_seq), fd_index, dtype=np.int64)
-    fd_valid_eval_last_idx = np.full(len(x_valid_eval_last_seq), fd_index, dtype=np.int64)
-    fd_valid_full_last_idx = np.full(len(x_valid_full_last_seq), fd_index, dtype=np.int64)
 
     model_cfg = ConvAttentionLSTMConfig(
         input_size=x_train_seq.shape[2],
@@ -231,7 +322,7 @@ def main() -> None:
         hidden_size=int(_pick(args.hidden_size, cfg_data, "hidden_size", 96)),
         num_layers=int(_pick(args.num_layers, cfg_data, "num_layers", 2)),
         dropout=float(_pick(args.dropout, cfg_data, "dropout", 0.2)),
-        num_fd_heads=int(_pick(args.num_fd_heads, cfg_data, "num_fd_heads", 4)),
+        num_fd_heads=int(_pick(args.num_fd_heads, cfg_data, "num_fd_heads", len(fds))),
         loss_name=str(_pick(args.loss_name, cfg_data, "loss_name", "huber_asymmetric")),
         huber_delta=float(_pick(args.huber_delta, cfg_data, "huber_delta", 10.0)),
         late_error_weight=float(_pick(args.late_error_weight, cfg_data, "late_error_weight", 0.35)),
@@ -239,9 +330,9 @@ def main() -> None:
         emphasize_failure=bool(_pick(args.emphasize_failure, cfg_data, "emphasize_failure", True)),
         failure_rul_threshold=int(_pick(args.failure_rul_threshold, cfg_data, "failure_rul_threshold", 30)),
         failure_weight=float(_pick(args.failure_weight, cfg_data, "failure_weight", 2.0)),
-        sampling_strategy=str(_pick(args.sampling_strategy, cfg_data, "sampling_strategy", "auto")),
+        sampling_strategy=str(_pick(args.sampling_strategy, cfg_data, "sampling_strategy", "balanced_fd_failure")),
         fd_balance_power=float(_pick(args.fd_balance_power, cfg_data, "fd_balance_power", 1.0)),
-        warmup_mse_epochs=int(_pick(args.warmup_mse_epochs, cfg_data, "warmup_mse_epochs", 0)),
+        warmup_mse_epochs=int(_pick(args.warmup_mse_epochs, cfg_data, "warmup_mse_epochs", 2)),
         learning_rate=float(_pick(args.learning_rate, cfg_data, "learning_rate", 1e-3)),
         weight_decay=float(_pick(args.weight_decay, cfg_data, "weight_decay", 1e-5)),
         epochs=int(_pick(args.epochs, cfg_data, "epochs", 12)),
@@ -258,7 +349,7 @@ def main() -> None:
     )
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    default_model_dir = ROOT / "models" / f"caelstm_{fd}_{ts}"
+    default_model_dir = ROOT / "models" / f"caelstm_multi_{'_'.join(fds)}_{ts}"
     model_dir = _resolve(args.model_dir) if args.model_dir else default_model_dir
     ensure_dir(model_dir)
 
@@ -272,6 +363,7 @@ def main() -> None:
         fd_train=fd_train_idx,
         fd_valid=fd_valid_eval_last_idx,
     )
+
     pred_valid_eval = predict_conv_attention_lstm(
         model,
         x_valid_eval_last_seq,
@@ -290,6 +382,7 @@ def main() -> None:
         pin_memory=model_cfg.pin_memory,
         fd_idx=fd_valid_full_last_idx,
     )
+
     metrics_primary = {
         "rmse": rmse(y_valid_eval_last_seq, pred_valid_eval),
         "mae": mae(y_valid_eval_last_seq, pred_valid_eval),
@@ -300,13 +393,26 @@ def main() -> None:
         "mae": mae(y_valid_full_last_seq, pred_valid_full_last),
         "phm_score": phm_score(y_valid_full_last_seq, pred_valid_full_last),
     }
+    metrics_by_fd_eval = _metrics_by_fd(
+        y_true=y_valid_eval_last_seq,
+        y_pred=pred_valid_eval,
+        fd_idx=fd_valid_eval_last_idx,
+        fd_index_map=fd_index_map,
+    )
+    metrics_by_fd_full_last = _metrics_by_fd(
+        y_true=y_valid_full_last_seq,
+        y_pred=pred_valid_full_last,
+        fd_idx=fd_valid_full_last_idx,
+        fd_index_map=fd_index_map,
+    )
 
     save_conv_attention_lstm_checkpoint(model, str(model_dir / "model.pt"))
     write_json(
         model_dir / "metadata.json",
         {
             "model_type": "conv_attn_lstm_regressor",
-            "fd": fd,
+            "fd": "MULTI",
+            "fds": fds,
             "data_dir": str(_resolve(data_dir)),
             "max_rul": max_rul,
             "seq_len": seq_len,
@@ -316,13 +422,13 @@ def main() -> None:
             "train_rows": int(len(train_df)),
             "valid_rows": int(len(valid_df_full)),
             "valid_eval_rows": int(len(valid_df_eval)),
-            "train_units": int(len(train_units)),
-            "valid_units": int(len(val_units)),
             "train_windows": int(len(x_train_seq)),
-            "valid_eval_windows": int(len(x_valid_eval_seq)),
             "valid_eval_last_cycle_windows": int(len(x_valid_eval_last_seq)),
             "metrics_valid": metrics_primary,
             "metrics_valid_full_last_cycle": metrics_full_last,
+            "metrics_valid_by_fd": metrics_by_fd_eval,
+            "metrics_valid_full_last_cycle_by_fd": metrics_by_fd_full_last,
+            "rows_by_fd": rows_by_fd,
             "history": history,
             "params": {
                 "conv_channels": model_cfg.conv_channels,
@@ -360,19 +466,23 @@ def main() -> None:
                 "device": resolved_device,
                 "val_strategy": val_strategy,
                 "val_min_prefix": val_min_prefix,
-                "fd_index": fd_index,
-                "fd_index_map": FD_INDEX_MAP,
+                "fd_index_map": fd_index_map,
             },
-            "validation_cuts": valid_cuts.to_dict(orient="records") if valid_cuts is not None else [],
+            "validation_cuts": valid_cuts.to_dict(orient="records") if len(valid_cuts) else [],
         },
     )
 
     print(f"Model directory: {model_dir}")
     print(f"Device: {resolved_device}")
+    print(f"FDs: {','.join(fds)}")
     print(f"Validation strategy: {val_strategy}")
-    print(f"Validation RMSE: {metrics_primary['rmse']:.4f}")
-    print(f"Validation MAE: {metrics_primary['mae']:.4f}")
-    print(f"Validation PHM score: {metrics_primary['phm_score']:.4f}")
+    print(f"Validation RMSE (all FD): {metrics_primary['rmse']:.4f}")
+    print(f"Validation MAE (all FD): {metrics_primary['mae']:.4f}")
+    print(f"Validation PHM score (all FD): {metrics_primary['phm_score']:.4f}")
+    for fd in fds:
+        m = metrics_by_fd_eval.get(fd)
+        if m is not None:
+            print(f"[{fd}] valid_rmse={m['rmse']:.4f} valid_mae={m['mae']:.4f} valid_phm={m['phm_score']:.4f}")
 
 
 if __name__ == "__main__":

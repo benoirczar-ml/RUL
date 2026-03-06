@@ -25,6 +25,9 @@ class ConvAttentionLSTMConfig:
     emphasize_failure: bool = True
     failure_rul_threshold: int = 30
     failure_weight: float = 2.0
+    sampling_strategy: str = "auto"
+    fd_balance_power: float = 1.0
+    warmup_mse_epochs: int = 0
     learning_rate: float = 1e-3
     weight_decay: float = 1e-5
     epochs: int = 12
@@ -181,10 +184,16 @@ def _asymmetric_huber_loss(
     return (base * weights).mean()
 
 
-def _compute_loss(cfg: ConvAttentionLSTMConfig, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    if cfg.loss_name == "mse":
+def _compute_loss(
+    cfg: ConvAttentionLSTMConfig,
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    loss_name: str | None = None,
+) -> torch.Tensor:
+    active_loss = cfg.loss_name if loss_name is None else str(loss_name)
+    if active_loss == "mse":
         return nn.functional.mse_loss(pred, target)
-    if cfg.loss_name == "huber_asymmetric":
+    if active_loss == "huber_asymmetric":
         return _asymmetric_huber_loss(
             pred=pred,
             target=target,
@@ -192,7 +201,14 @@ def _compute_loss(cfg: ConvAttentionLSTMConfig, pred: torch.Tensor, target: torc
             late_error_weight=float(cfg.late_error_weight),
             late_error_margin=float(cfg.late_error_margin),
         )
-    raise ValueError(f"Unsupported loss_name={cfg.loss_name}")
+    raise ValueError(f"Unsupported loss_name={active_loss}")
+
+
+def _resolve_sampling_strategy(cfg: ConvAttentionLSTMConfig) -> str:
+    strategy = str(cfg.sampling_strategy).lower()
+    if strategy == "auto":
+        return "failure_weighted" if cfg.emphasize_failure else "shuffle"
+    return strategy
 
 
 def _build_train_loader(
@@ -219,17 +235,33 @@ def _build_train_loader(
     if int(loader_kwargs["num_workers"]) > 0:
         loader_kwargs["persistent_workers"] = True
 
-    if cfg.emphasize_failure:
-        weights = np.ones_like(y_train, dtype=np.float64)
-        weights[y_train <= float(cfg.failure_rul_threshold)] *= float(cfg.failure_weight)
-        sampler = WeightedRandomSampler(
-            weights=torch.from_numpy(weights),
-            num_samples=int(len(weights)),
-            replacement=True,
-        )
-        loader_kwargs["sampler"] = sampler
-    else:
+    strategy = _resolve_sampling_strategy(cfg)
+    if strategy == "shuffle":
         loader_kwargs["shuffle"] = True
+        return DataLoader(train_ds, **loader_kwargs)
+
+    if strategy not in {"failure_weighted", "balanced_fd_failure"}:
+        raise ValueError(f"Unsupported sampling_strategy={cfg.sampling_strategy}")
+
+    weights = np.ones_like(y_train, dtype=np.float64)
+    if strategy == "balanced_fd_failure":
+        if fd_train is None:
+            raise ValueError("fd_train is required for balanced_fd_failure sampling_strategy.")
+        unique_fd, counts_fd = np.unique(fd_train.astype(np.int64), return_counts=True)
+        balance_power = max(0.0, float(cfg.fd_balance_power))
+        for fd_id, fd_count in zip(unique_fd, counts_fd):
+            if fd_count > 0:
+                weights[fd_train == fd_id] *= 1.0 / (float(fd_count) ** balance_power)
+
+    if cfg.emphasize_failure:
+        weights[y_train <= float(cfg.failure_rul_threshold)] *= float(cfg.failure_weight)
+
+    sampler = WeightedRandomSampler(
+        weights=torch.from_numpy(weights),
+        num_samples=int(len(weights)),
+        replacement=True,
+    )
+    loader_kwargs["sampler"] = sampler
 
     return DataLoader(train_ds, **loader_kwargs)
 
@@ -298,6 +330,7 @@ def train_conv_attention_lstm_regressor(
         model.train()
         train_losses = []
 
+        epoch_loss_name = "mse" if epoch <= max(0, int(cfg.warmup_mse_epochs)) else cfg.loss_name
         for batch in train_loader:
             if len(batch) == 3:
                 xb, yb, fb = batch
@@ -313,7 +346,7 @@ def train_conv_attention_lstm_regressor(
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
                 pred = model(xb, fd_idx=fb)
-                loss = _compute_loss(cfg, pred, yb)
+                loss = _compute_loss(cfg, pred, yb, loss_name=epoch_loss_name)
             if use_amp:
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -352,6 +385,7 @@ def train_conv_attention_lstm_regressor(
             print(
                 f"epoch {epoch:03d}/{cfg.epochs:03d} "
                 f"train_loss={train_loss:.6f} "
+                f"loss={epoch_loss_name} "
                 f"valid_rmse={valid_rmse:.6f} "
                 f"valid_mae={valid_mae:.6f} "
                 f"best_rmse={best_rmse:.6f} "
@@ -438,6 +472,29 @@ def load_conv_attention_lstm_checkpoint(path: str, device: str = "auto") -> tupl
     except TypeError:
         ckpt = torch.load(path, map_location=resolved_device)
     arch = ckpt["arch"]
+    state_dict = ckpt["state_dict"]
+    # Backward compatibility for older checkpoints that used a single "regressor" head.
+    if "num_fd_heads" not in arch:
+        arch["num_fd_heads"] = 1
+    if any(k.startswith("regressor.") for k in state_dict.keys()):
+        remapped: dict[str, torch.Tensor] = {}
+        for k, v in state_dict.items():
+            if k.startswith("regressor."):
+                remapped[k.replace("regressor.", "shared_head.net.", 1)] = v
+            else:
+                remapped[k] = v
+        # For old single-head checkpoints, mirror shared head weights to fd_heads[0].
+        head_pairs = [
+            ("shared_head.net.0.weight", "fd_heads.0.net.0.weight"),
+            ("shared_head.net.0.bias", "fd_heads.0.net.0.bias"),
+            ("shared_head.net.2.weight", "fd_heads.0.net.2.weight"),
+            ("shared_head.net.2.bias", "fd_heads.0.net.2.bias"),
+        ]
+        for src, dst in head_pairs:
+            if src in remapped and dst not in remapped:
+                remapped[dst] = remapped[src].clone()
+        state_dict = remapped
+
     model = ConvAttentionLSTMRegressor(
         input_size=int(arch["input_size"]),
         conv_channels=int(arch["conv_channels"]),
@@ -448,6 +505,6 @@ def load_conv_attention_lstm_checkpoint(path: str, device: str = "auto") -> tupl
         dropout=float(arch["dropout"]),
         num_fd_heads=int(arch.get("num_fd_heads", 1)),
     ).to(resolved_device)
-    model.load_state_dict(ckpt["state_dict"])
+    model.load_state_dict(state_dict, strict=True)
     model.eval()
     return model, resolved_device
