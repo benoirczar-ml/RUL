@@ -42,3 +42,39 @@ def test_evaluate_alert_policy_basic_metrics() -> None:
     assert len(per_unit) == 2
     assert len(alerts) >= 1
 
+
+def test_generate_alerts_hysteresis_blocks_repeated_alerts() -> None:
+    pred_df = pd.DataFrame(
+        {
+            "unit": [1, 1, 1, 1, 1],
+            "cycle": [1, 2, 3, 4, 5],
+            "pred_rul": [45.0, 35.0, 30.0, 25.0, 20.0],
+        }
+    )
+    alerts = generate_alerts(
+        pred_df,
+        trigger_rul=40.0,
+        exit_rul=60.0,
+        consecutive=1,
+        cooldown_cycles=0,
+    )
+    assert alerts["cycle"].tolist() == [2]
+
+
+def test_generate_alerts_trend_gate_requires_drop() -> None:
+    pred_df = pd.DataFrame(
+        {
+            "unit": [1, 1, 1, 1, 1],
+            "cycle": [1, 2, 3, 4, 5],
+            "pred_rul": [120.0, 100.0, 95.0, 92.0, 90.0],
+        }
+    )
+    alerts = generate_alerts(
+        pred_df,
+        trigger_rul=100.0,
+        consecutive=1,
+        cooldown_cycles=0,
+        trend_window=2,
+        trend_delta=20.0,
+    )
+    assert alerts["cycle"].tolist() == [3]

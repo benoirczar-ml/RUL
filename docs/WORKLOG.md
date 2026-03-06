@@ -102,3 +102,19 @@
 - Smoke wyniki (FD001, model `models/tuning_v2_trunc/FD001/trial_004`):
   - best policy: trigger=60, consecutive=2, cooldown=10
   - recall=1.00, false_alert_rate=0.1315, median lead time=98 cykli.
+
+## 2026-03-06 - 2-stage gating + hysteresis (operational policy v2)
+- Rozszerzono polityke alertow o:
+  - `exit_rul` (hysteresis),
+  - `trend_window` + `trend_delta` (2-stage trend gate).
+- Zmienione pliki:
+  - `src/rul_pipeline/operations.py`
+  - `evaluate_operational_policy.py`
+  - `tests/test_operations.py`
+- Testy: `pytest` 9/9 passed.
+- Kalibracja na `FD001..FD004`:
+  - `outputs/ops_calibration_v2/ops_policy_all_fd_v2.csv`
+  - utrzymany recall=1.0 na wszystkich FD,
+  - mniejsza liczba alertow / false alerts vs polityka bez trend gate.
+- Dodatkowa notatka:
+  - `NaN` w kolumnie `exit_rul` oznacza `None` (brak hysteresis), bez wpływu na obliczenia.

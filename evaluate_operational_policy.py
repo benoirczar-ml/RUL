@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -33,8 +34,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", default="train", choices=["train", "test"], help="Dataset split.")
     parser.add_argument("--data-dir", default="RULdata/CMAPSSData", help="CMAPSSData directory.")
     parser.add_argument("--trigger-ruls", default="30", help="Comma list, e.g. 20,30,40.")
+    parser.add_argument(
+        "--exit-ruls",
+        default="",
+        help="Comma list for hysteresis exit threshold, e.g. 120,140. Empty disables hysteresis.",
+    )
     parser.add_argument("--consecutives", default="1", help="Comma list, e.g. 1,2.")
     parser.add_argument("--cooldowns", default="0", help="Comma list in cycles, e.g. 0,5,10.")
+    parser.add_argument("--trend-windows", default="0", help="Comma list in cycles, e.g. 0,3,5.")
+    parser.add_argument("--trend-deltas", default="0", help="Comma list in RUL units, e.g. 0,5,10.")
     parser.add_argument("--min-lead", type=int, default=5, help="Min lead time cycles for true detection.")
     parser.add_argument("--max-lead", type=int, default=130, help="Max lead time cycles for true detection.")
     parser.add_argument("--output-csv", default="outputs/operational_policy_grid.csv", help="Grid result CSV.")
@@ -42,6 +50,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--per-unit-csv", default="outputs/operational_policy_per_unit.csv", help="Per-unit CSV for best policy.")
     parser.add_argument("--alerts-csv", default="outputs/operational_policy_alerts.csv", help="Alerts CSV for best policy.")
     return parser.parse_args()
+
+
+def parse_optional_float_list_csv(csv_text: str) -> list[float | None]:
+    raw = csv_text.strip()
+    if raw == "":
+        return [None]
+    out: list[float | None] = []
+    for token in raw.split(","):
+        t = token.strip().lower()
+        if not t:
+            continue
+        if t in {"none", "null", "na"}:
+            out.append(None)
+        else:
+            out.append(float(token))
+    return out
+
+
+def is_better_policy(cur: dict, best: dict | None) -> bool:
+    if best is None:
+        return True
+    if cur["recall"] != best["recall"]:
+        return cur["recall"] > best["recall"]
+    if cur["false_alerts"] != best["false_alerts"]:
+        return cur["false_alerts"] < best["false_alerts"]
+    cur_med = cur["median_lead_time_cycles"]
+    best_med = best["median_lead_time_cycles"]
+    if math.isnan(cur_med) and not math.isnan(best_med):
+        return False
+    if not math.isnan(cur_med) and math.isnan(best_med):
+        return True
+    if cur_med != best_med:
+        return cur_med > best_med
+    return cur["mean_lead_time_cycles"] > best["mean_lead_time_cycles"]
 
 
 def main() -> None:
@@ -62,28 +104,48 @@ def main() -> None:
     )
 
     trigger_ruls = parse_float_list_csv(args.trigger_ruls)
+    exit_ruls = parse_optional_float_list_csv(args.exit_ruls)
     consecutives = parse_int_list_csv(args.consecutives)
     cooldowns = parse_int_list_csv(args.cooldowns)
-    if not trigger_ruls or not consecutives or not cooldowns:
+    trend_windows = parse_int_list_csv(args.trend_windows)
+    trend_deltas = parse_float_list_csv(args.trend_deltas)
+    if not trigger_ruls or not consecutives or not cooldowns or not exit_ruls or not trend_windows or not trend_deltas:
         raise ValueError("Policy grids must be non-empty.")
 
     rows: list[dict] = []
     best_summary = None
     best_per_unit = None
     best_alerts = None
-    for trigger_rul, consecutive, cooldown in iter_policy_grid(trigger_ruls, consecutives, cooldowns):
+    for trigger_rul, exit_rul, consecutive, cooldown, trend_window, trend_delta in iter_policy_grid(
+        trigger_ruls,
+        consecutives,
+        cooldowns,
+        exit_ruls=exit_ruls,
+        trend_windows=trend_windows,
+        trend_deltas=trend_deltas,
+    ):
+        if exit_rul is not None and exit_rul < trigger_rul:
+            continue
+        if trend_window == 0 and trend_delta > 0:
+            continue
         summary, per_unit_df, alerts_df = evaluate_alert_policy(
             pred_df=pred_df,
             trigger_rul=trigger_rul,
+            exit_rul=exit_rul,
             consecutive=consecutive,
             cooldown_cycles=cooldown,
+            trend_window=trend_window,
+            trend_delta=trend_delta,
             min_lead=args.min_lead,
             max_lead=args.max_lead,
         )
         row = {
             "trigger_rul": trigger_rul,
+            "exit_rul": exit_rul,
             "consecutive": consecutive,
             "cooldown_cycles": cooldown,
+            "trend_window": trend_window,
+            "trend_delta": trend_delta,
             "recall": summary["recall"],
             "missed_units": summary["missed_units"],
             "false_alerts": summary["false_alerts"],
@@ -94,35 +156,21 @@ def main() -> None:
         }
         rows.append(row)
 
-        if best_summary is None:
+        if is_better_policy(row, None if best_summary is None else {
+            "recall": best_summary["recall"],
+            "false_alerts": best_summary["false_alerts"],
+            "median_lead_time_cycles": best_summary["median_lead_time_cycles"],
+            "mean_lead_time_cycles": best_summary["mean_lead_time_cycles"],
+        }):
             best_summary = summary
             best_per_unit = per_unit_df
             best_alerts = alerts_df
-        else:
-            cur = row
-            best_row = {
-                "recall": best_summary["recall"],
-                "missed_units": best_summary["missed_units"],
-                "false_alerts": best_summary["false_alerts"],
-                "median_lead_time_cycles": best_summary["median_lead_time_cycles"],
-            }
-            better = (
-                (cur["recall"] > best_row["recall"])
-                or (cur["recall"] == best_row["recall"] and cur["false_alerts"] < best_row["false_alerts"])
-                or (
-                    cur["recall"] == best_row["recall"]
-                    and cur["false_alerts"] == best_row["false_alerts"]
-                    and cur["median_lead_time_cycles"] > best_row["median_lead_time_cycles"]
-                )
-            )
-            if better:
-                best_summary = summary
-                best_per_unit = per_unit_df
-                best_alerts = alerts_df
+    if not rows:
+        raise ValueError("No valid policy combinations after constraints.")
 
     result_df = pd.DataFrame(rows).sort_values(
-        ["recall", "false_alerts", "median_lead_time_cycles"],
-        ascending=[False, True, False],
+        ["recall", "false_alerts", "median_lead_time_cycles", "mean_lead_time_cycles"],
+        ascending=[False, True, False, False],
     )
 
     out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -161,4 +209,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

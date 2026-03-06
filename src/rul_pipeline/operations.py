@@ -9,8 +9,11 @@ import pandas as pd
 def generate_alerts(
     pred_df: pd.DataFrame,
     trigger_rul: float,
+    exit_rul: float | None = None,
     consecutive: int = 1,
     cooldown_cycles: int = 0,
+    trend_window: int = 0,
+    trend_delta: float = 0.0,
 ) -> pd.DataFrame:
     required_cols = {"unit", "cycle", "pred_rul"}
     if not required_cols.issubset(pred_df.columns):
@@ -19,17 +22,41 @@ def generate_alerts(
         raise ValueError("consecutive must be >= 1")
     if cooldown_cycles < 0:
         raise ValueError("cooldown_cycles must be >= 0")
+    if trend_window < 0:
+        raise ValueError("trend_window must be >= 0")
+    if trend_delta < 0:
+        raise ValueError("trend_delta must be >= 0")
 
     rows: list[dict] = []
     sorted_df = pred_df.sort_values(["unit", "cycle"]).reset_index(drop=True)
+    use_hysteresis = exit_rul is not None and float(exit_rul) > float(trigger_rul)
     for unit, grp in sorted_df.groupby("unit", sort=True):
         g = grp.sort_values("cycle")
+        pred_values = g["pred_rul"].astype(float).to_numpy()
+        cycle_values = g["cycle"].astype(int).to_numpy()
         streak = 0
+        in_alert_state = False
         last_alert_cycle = -10**9
-        for _, row in g.iterrows():
-            cycle = int(row["cycle"])
-            pred_rul = float(row["pred_rul"])
-            if pred_rul <= trigger_rul:
+        for i in range(len(g)):
+            cycle = int(cycle_values[i])
+            pred_rul = float(pred_values[i])
+
+            if use_hysteresis and in_alert_state:
+                if pred_rul >= float(exit_rul):
+                    in_alert_state = False
+                else:
+                    streak = 0
+                    continue
+
+            if trend_window <= 0:
+                trend_ok = True
+            elif i < trend_window:
+                trend_ok = False
+            else:
+                drop = float(pred_values[i - trend_window] - pred_rul)
+                trend_ok = drop >= trend_delta
+
+            if pred_rul <= trigger_rul and trend_ok:
                 streak += 1
             else:
                 streak = 0
@@ -38,6 +65,8 @@ def generate_alerts(
             if streak >= consecutive and can_alert:
                 rows.append({"unit": int(unit), "cycle": cycle, "pred_rul": pred_rul})
                 last_alert_cycle = cycle
+                if use_hysteresis:
+                    in_alert_state = True
                 streak = 0
 
     return pd.DataFrame(rows, columns=["unit", "cycle", "pred_rul"])
@@ -46,8 +75,11 @@ def generate_alerts(
 def evaluate_alert_policy(
     pred_df: pd.DataFrame,
     trigger_rul: float,
+    exit_rul: float | None = None,
     consecutive: int = 1,
     cooldown_cycles: int = 0,
+    trend_window: int = 0,
+    trend_delta: float = 0.0,
     min_lead: int = 1,
     max_lead: int | None = None,
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
@@ -63,8 +95,11 @@ def evaluate_alert_policy(
     alerts_df = generate_alerts(
         pred_df=sorted_df,
         trigger_rul=trigger_rul,
+        exit_rul=exit_rul,
         consecutive=consecutive,
         cooldown_cycles=cooldown_cycles,
+        trend_window=trend_window,
+        trend_delta=trend_delta,
     )
 
     per_unit_rows: list[dict] = []
@@ -138,8 +173,11 @@ def evaluate_alert_policy(
         "alerts_per_unit": alerts_per_unit,
         "policy": {
             "trigger_rul": float(trigger_rul),
+            "exit_rul": None if exit_rul is None else float(exit_rul),
             "consecutive": int(consecutive),
             "cooldown_cycles": int(cooldown_cycles),
+            "trend_window": int(trend_window),
+            "trend_delta": float(trend_delta),
             "min_lead": int(min_lead),
             "max_lead": None if max_lead is None else int(max_lead),
         },
@@ -159,9 +197,18 @@ def iter_policy_grid(
     trigger_ruls: Iterable[float],
     consecutives: Iterable[int],
     cooldown_cycles: Iterable[int],
-) -> Iterable[tuple[float, int, int]]:
-    for tr in trigger_ruls:
-        for c in consecutives:
-            for cd in cooldown_cycles:
-                yield float(tr), int(c), int(cd)
+    exit_ruls: Iterable[float | None] | None = None,
+    trend_windows: Iterable[int] | None = None,
+    trend_deltas: Iterable[float] | None = None,
+) -> Iterable[tuple[float, float | None, int, int, int, float]]:
+    exit_values = list(exit_ruls) if exit_ruls is not None else [None]
+    trend_windows_values = list(trend_windows) if trend_windows is not None else [0]
+    trend_deltas_values = list(trend_deltas) if trend_deltas is not None else [0.0]
 
+    for tr in trigger_ruls:
+        for ex in exit_values:
+            for c in consecutives:
+                for cd in cooldown_cycles:
+                    for tw in trend_windows_values:
+                        for td in trend_deltas_values:
+                            yield float(tr), (None if ex is None else float(ex)), int(c), int(cd), int(tw), float(td)

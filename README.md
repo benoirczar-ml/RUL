@@ -122,6 +122,37 @@ Przyklad najlepszego wariantu (FD001 train, model `trial_004`):
 - false alert rate: `0.1315`
 - median lead time: `98` cykli
 
+### 2-stage gate + hysteresis
+Mozna wlaczyc dodatkowe bramki:
+- `exit_rul` (hysteresis: wyjscie ze stanu alarmu),
+- `trend_window` + `trend_delta` (wymagany spadek predykcji RUL).
+
+Przyklad:
+```bash
+python evaluate_operational_policy.py \
+  --model-dir models/tuning_v2_trunc/FD001/trial_004 \
+  --fd FD001 \
+  --split train \
+  --trigger-ruls 80,100,120,140 \
+  --exit-ruls none,140,160 \
+  --consecutives 2,3 \
+  --cooldowns 10,20 \
+  --trend-windows 0,5 \
+  --trend-deltas 0,5 \
+  --min-lead 5 \
+  --max-lead 120 \
+  --output-csv outputs/ops_policy_fd001_hybrid.csv \
+  --output-json outputs/ops_policy_fd001_hybrid.json
+```
+
+Uwaga:
+- w CSV wartosc `NaN` w kolumnie `exit_rul` oznacza `None` (czyli brak hysteresis), to nie jest blad.
+
+Kalibracja V2 (4xFD, best LSTM per FD):
+- plik zbiorczy: `outputs/ops_calibration_v2/ops_policy_all_fd_v2.csv`
+- dla wszystkich FD utrzymany `recall=1.0`,
+- trend gate (`trend_window=5`) obniza laczna liczbe alertow i false alerts vs wersja bez trendu.
+
 ## Stabilnosc protokolu walidacji truncation
 ```bash
 python validate_truncation_protocol.py \
