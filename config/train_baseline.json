@@ -1,0 +1,13 @@
+{
+  "data_dir": "RULdata/CMAPSSData",
+  "fd": "FD001",
+  "max_rul": 125,
+  "val_fraction": 0.2,
+  "seed": 42,
+  "max_iter": 400,
+  "learning_rate": 0.05,
+  "max_depth": 8,
+  "min_samples_leaf": 30,
+  "l2_regularization": 0.0
+}
+
