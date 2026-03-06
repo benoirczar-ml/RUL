@@ -271,6 +271,14 @@ Artefakty:
 - `outputs/tuning_hybrid/hybrid_tuning_FD001.csv` ... `hybrid_tuning_FD004.csv`
 - `outputs/tuning_hybrid/hybrid_tuning_all_fd.csv`
 
+## Tuning hybrydy multi-FD (jeden model dla wszystkich FD)
+```bash
+python tune_hybrid_multifd.py --config config/tune_hybrid_multifd.json --max-trials 10
+```
+Artefakty:
+- `outputs/tuning_hybrid_multifd/hybrid_multifd_tuning.csv`
+- `outputs/tuning_hybrid_multifd/hybrid_multifd_tuning.json`
+
 ## Jak to komunikowac
 - Projekt mozna bezpiecznie pokazywac rekruterom i zespolom ML jako mocny PoC end-to-end.
 - Nie nalezy opisywac tego etapu jako gotowy system produkcyjny dla lotnictwa.
