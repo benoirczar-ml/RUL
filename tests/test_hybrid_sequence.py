@@ -20,6 +20,7 @@ def test_hybrid_forward_shape() -> None:
         hidden_size=12,
         num_layers=1,
         dropout=0.1,
+        num_fd_heads=1,
     )
     x = torch.randn(5, 10, 8)
     y = model(x)
@@ -41,12 +42,14 @@ def test_hybrid_train_predict_smoke() -> None:
         hidden_size=12,
         num_layers=1,
         dropout=0.1,
+        num_fd_heads=1,
         epochs=2,
         batch_size=16,
         patience=2,
         use_amp=False,
         pin_memory=False,
         non_blocking=False,
+        emphasize_failure=False,
     )
     model, history, resolved_device = train_conv_attention_lstm_regressor(
         x_train=x_train,
@@ -60,3 +63,20 @@ def test_hybrid_train_predict_smoke() -> None:
 
     assert len(history) >= 1
     assert preds.shape == (16,)
+
+
+def test_hybrid_multihead_predict_requires_fd_idx() -> None:
+    model = ConvAttentionLSTMRegressor(
+        input_size=8,
+        conv_channels=16,
+        kernel_size=3,
+        attention_heads=4,
+        hidden_size=12,
+        num_layers=1,
+        dropout=0.1,
+        num_fd_heads=4,
+    )
+    x = np.random.default_rng(1).normal(size=(4, 10, 8)).astype(np.float32)
+    fd_idx = np.array([0, 1, 2, 3], dtype=np.int64)
+    preds = predict_conv_attention_lstm(model, x, batch_size=2, device="cpu", fd_idx=fd_idx)
+    assert preds.shape == (4,)

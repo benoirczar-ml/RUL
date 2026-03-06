@@ -19,6 +19,7 @@ def _predict_on_dataframe(
     metadata: dict,
     data_df: pd.DataFrame,
     device: str,
+    dataset_fd: str | None = None,
 ) -> pd.DataFrame:
     model_type = metadata["model_type"]
     df_sorted = data_df.sort_values(["unit", "cycle"]).reset_index(drop=True)
@@ -83,6 +84,11 @@ def _predict_on_dataframe(
         batch_size = int(metadata["params"].get("batch_size", 256))
         use_non_blocking = bool(metadata["params"].get("non_blocking", False))
         use_pin_memory = bool(metadata["params"].get("pin_memory", True))
+        fd_name = str(dataset_fd or metadata.get("fd", "FD001")).upper()
+        fd_index_map = metadata.get("params", {}).get("fd_index_map", {"FD001": 0, "FD002": 1, "FD003": 2, "FD004": 3})
+        fallback_fd = str(metadata.get("fd", "FD001")).upper()
+        fd_index = int(fd_index_map.get(fd_name, fd_index_map.get(fallback_fd, 0)))
+        fd_idx = np.full(len(x_seq), fd_index, dtype=np.int64)
         y_pred = predict_conv_attention_lstm(
             model,
             x_seq,
@@ -90,6 +96,7 @@ def _predict_on_dataframe(
             device=resolved_device,
             non_blocking=use_non_blocking,
             pin_memory=use_pin_memory,
+            fd_idx=fd_idx,
         )
 
         cycles = df_sorted["cycle"].astype(int).to_numpy()
@@ -111,7 +118,13 @@ def predict_on_dataframe(
 ) -> tuple[pd.DataFrame, dict]:
     model_dir = Path(model_dir)
     metadata = read_json(model_dir / "metadata.json")
-    pred_df = _predict_on_dataframe(model_dir=model_dir, metadata=metadata, data_df=data_df, device=device)
+    pred_df = _predict_on_dataframe(
+        model_dir=model_dir,
+        metadata=metadata,
+        data_df=data_df,
+        device=device,
+        dataset_fd=str(metadata.get("fd", "FD001")),
+    )
     return pred_df, metadata
 
 
@@ -127,7 +140,13 @@ def predict_all_cycles(
     run_fd = fd or metadata["fd"]
     run_data_dir = Path(data_dir) if data_dir is not None else Path(metadata["data_dir"])
     split_df = load_split(run_data_dir, fd_id=run_fd, split=split)
-    pred_df = _predict_on_dataframe(model_dir=model_dir, metadata=metadata, data_df=split_df, device=device)
+    pred_df = _predict_on_dataframe(
+        model_dir=model_dir,
+        metadata=metadata,
+        data_df=split_df,
+        device=device,
+        dataset_fd=run_fd,
+    )
     return pred_df, metadata
 
 

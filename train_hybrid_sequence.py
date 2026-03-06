@@ -24,6 +24,8 @@ from rul_pipeline.io_utils import ensure_dir, read_json, write_json
 from rul_pipeline.metrics import mae, phm_score, rmse
 from rul_pipeline.sequence import apply_window_standardizer, build_sequence_samples, fit_window_standardizer
 
+FD_INDEX_MAP = {"FD001": 0, "FD002": 1, "FD003": 2, "FD004": 3}
+
 
 def _resolve(path_arg: str | None) -> Path | None:
     if path_arg is None:
@@ -53,6 +55,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-size", type=int, default=None, help="LSTM hidden size.")
     parser.add_argument("--num-layers", type=int, default=None, help="LSTM layers.")
     parser.add_argument("--dropout", type=float, default=None, help="Dropout.")
+    parser.add_argument("--num-fd-heads", type=int, default=None, help="Number of FD-specific heads.")
+    parser.add_argument("--loss-name", choices=["mse", "huber_asymmetric"], default=None, help="Training loss.")
+    parser.add_argument("--huber-delta", type=float, default=None, help="Huber delta for asymmetric loss.")
+    parser.add_argument("--late-error-weight", type=float, default=None, help="Extra weight for late errors.")
+    parser.add_argument("--late-error-margin", type=float, default=None, help="Late error threshold on (pred-true).")
+    parser.add_argument(
+        "--emphasize-failure",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use weighted sampling to emphasize low-RUL windows.",
+    )
+    parser.add_argument("--failure-rul-threshold", type=int, default=None, help="Low-RUL threshold for sampling weight.")
+    parser.add_argument("--failure-weight", type=float, default=None, help="Sample weight multiplier for low-RUL windows.")
     parser.add_argument("--learning-rate", type=float, default=None, help="Learning rate.")
     parser.add_argument("--weight-decay", type=float, default=None, help="Adam weight decay.")
     parser.add_argument("--epochs", type=int, default=None, help="Training epochs.")
@@ -108,7 +123,10 @@ def main() -> None:
     cfg_data = read_json(cfg_path) if cfg_path and cfg_path.exists() else {}
 
     data_dir = _pick(args.data_dir, cfg_data, "data_dir", "RULdata/CMAPSSData")
-    fd = _pick(args.fd, cfg_data, "fd", "FD001")
+    fd = str(_pick(args.fd, cfg_data, "fd", "FD001")).upper()
+    if fd not in FD_INDEX_MAP:
+        raise ValueError(f"Unsupported fd={fd}. Expected one of {sorted(FD_INDEX_MAP)}.")
+    fd_index = FD_INDEX_MAP[fd]
     max_rul = int(_pick(args.max_rul, cfg_data, "max_rul", 125))
     val_fraction = float(_pick(args.val_fraction, cfg_data, "val_fraction", 0.2))
     seed = int(_pick(args.seed, cfg_data, "seed", 42))
@@ -193,6 +211,10 @@ def main() -> None:
     x_valid_eval_last_seq = apply_window_standardizer(x_valid_eval_last_seq, mean, std)
     x_valid_full_last_seq = apply_window_standardizer(x_valid_full_last_seq, mean, std)
 
+    fd_train_idx = np.full(len(x_train_seq), fd_index, dtype=np.int64)
+    fd_valid_eval_last_idx = np.full(len(x_valid_eval_last_seq), fd_index, dtype=np.int64)
+    fd_valid_full_last_idx = np.full(len(x_valid_full_last_seq), fd_index, dtype=np.int64)
+
     model_cfg = ConvAttentionLSTMConfig(
         input_size=x_train_seq.shape[2],
         conv_channels=int(_pick(args.conv_channels, cfg_data, "conv_channels", 96)),
@@ -201,6 +223,14 @@ def main() -> None:
         hidden_size=int(_pick(args.hidden_size, cfg_data, "hidden_size", 96)),
         num_layers=int(_pick(args.num_layers, cfg_data, "num_layers", 2)),
         dropout=float(_pick(args.dropout, cfg_data, "dropout", 0.2)),
+        num_fd_heads=int(_pick(args.num_fd_heads, cfg_data, "num_fd_heads", 4)),
+        loss_name=str(_pick(args.loss_name, cfg_data, "loss_name", "huber_asymmetric")),
+        huber_delta=float(_pick(args.huber_delta, cfg_data, "huber_delta", 10.0)),
+        late_error_weight=float(_pick(args.late_error_weight, cfg_data, "late_error_weight", 0.35)),
+        late_error_margin=float(_pick(args.late_error_margin, cfg_data, "late_error_margin", 0.0)),
+        emphasize_failure=bool(_pick(args.emphasize_failure, cfg_data, "emphasize_failure", True)),
+        failure_rul_threshold=int(_pick(args.failure_rul_threshold, cfg_data, "failure_rul_threshold", 30)),
+        failure_weight=float(_pick(args.failure_weight, cfg_data, "failure_weight", 2.0)),
         learning_rate=float(_pick(args.learning_rate, cfg_data, "learning_rate", 1e-3)),
         weight_decay=float(_pick(args.weight_decay, cfg_data, "weight_decay", 1e-5)),
         epochs=int(_pick(args.epochs, cfg_data, "epochs", 12)),
@@ -228,6 +258,8 @@ def main() -> None:
         y_valid_eval_last_seq,
         cfg=model_cfg,
         device=device,
+        fd_train=fd_train_idx,
+        fd_valid=fd_valid_eval_last_idx,
     )
     pred_valid_eval = predict_conv_attention_lstm(
         model,
@@ -236,6 +268,7 @@ def main() -> None:
         device=resolved_device,
         non_blocking=model_cfg.non_blocking,
         pin_memory=model_cfg.pin_memory,
+        fd_idx=fd_valid_eval_last_idx,
     )
     pred_valid_full_last = predict_conv_attention_lstm(
         model,
@@ -244,6 +277,7 @@ def main() -> None:
         device=resolved_device,
         non_blocking=model_cfg.non_blocking,
         pin_memory=model_cfg.pin_memory,
+        fd_idx=fd_valid_full_last_idx,
     )
     metrics_primary = {
         "rmse": rmse(y_valid_eval_last_seq, pred_valid_eval),
@@ -286,6 +320,14 @@ def main() -> None:
                 "hidden_size": model_cfg.hidden_size,
                 "num_layers": model_cfg.num_layers,
                 "dropout": model_cfg.dropout,
+                "num_fd_heads": model_cfg.num_fd_heads,
+                "loss_name": model_cfg.loss_name,
+                "huber_delta": model_cfg.huber_delta,
+                "late_error_weight": model_cfg.late_error_weight,
+                "late_error_margin": model_cfg.late_error_margin,
+                "emphasize_failure": model_cfg.emphasize_failure,
+                "failure_rul_threshold": model_cfg.failure_rul_threshold,
+                "failure_weight": model_cfg.failure_weight,
                 "learning_rate": model_cfg.learning_rate,
                 "weight_decay": model_cfg.weight_decay,
                 "epochs": model_cfg.epochs,
@@ -304,6 +346,8 @@ def main() -> None:
                 "device": resolved_device,
                 "val_strategy": val_strategy,
                 "val_min_prefix": val_min_prefix,
+                "fd_index": fd_index,
+                "fd_index_map": FD_INDEX_MAP,
             },
             "validation_cuts": valid_cuts.to_dict(orient="records") if valid_cuts is not None else [],
         },

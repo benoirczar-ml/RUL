@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 
 
 @dataclass
@@ -17,6 +17,14 @@ class ConvAttentionLSTMConfig:
     hidden_size: int = 96
     num_layers: int = 2
     dropout: float = 0.2
+    num_fd_heads: int = 4
+    loss_name: str = "huber_asymmetric"
+    huber_delta: float = 10.0
+    late_error_weight: float = 0.35
+    late_error_margin: float = 0.0
+    emphasize_failure: bool = True
+    failure_rul_threshold: int = 30
+    failure_weight: float = 2.0
     learning_rate: float = 1e-3
     weight_decay: float = 1e-5
     epochs: int = 12
@@ -32,6 +40,19 @@ class ConvAttentionLSTMConfig:
     log_every_epoch: bool = True
 
 
+class _RegressorHead(nn.Module):
+    def __init__(self, hidden_size: int) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_size // 2, 1),
+        )
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        return self.net(h).squeeze(-1)
+
+
 class ConvAttentionLSTMRegressor(nn.Module):
     def __init__(
         self,
@@ -42,12 +63,15 @@ class ConvAttentionLSTMRegressor(nn.Module):
         hidden_size: int,
         num_layers: int,
         dropout: float,
+        num_fd_heads: int = 1,
     ) -> None:
         super().__init__()
         if conv_channels % attention_heads != 0:
             raise ValueError(
                 f"conv_channels must be divisible by attention_heads, got {conv_channels} and {attention_heads}"
             )
+        if num_fd_heads < 1:
+            raise ValueError("num_fd_heads must be >= 1.")
 
         self.input_size = input_size
         self.conv_channels = conv_channels
@@ -56,6 +80,7 @@ class ConvAttentionLSTMRegressor(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.dropout = dropout
+        self.num_fd_heads = num_fd_heads
 
         self.temporal_conv = nn.Conv1d(
             in_channels=input_size,
@@ -80,13 +105,11 @@ class ConvAttentionLSTMRegressor(nn.Module):
             dropout=lstm_dropout,
             batch_first=True,
         )
-        self.regressor = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_size // 2, 1),
-        )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.shared_head = _RegressorHead(hidden_size)
+        self.fd_heads = nn.ModuleList([_RegressorHead(hidden_size) for _ in range(num_fd_heads)])
+
+    def forward(self, x: torch.Tensor, fd_idx: torch.Tensor | None = None) -> torch.Tensor:
         h = x.transpose(1, 2)
         h = torch.relu(self.temporal_conv(h))
         h = h.transpose(1, 2)
@@ -96,7 +119,26 @@ class ConvAttentionLSTMRegressor(nn.Module):
 
         h_lstm, _ = self.lstm(h)
         h_last = h_lstm[:, -1, :]
-        return self.regressor(h_last).squeeze(-1)
+
+        if self.num_fd_heads == 1:
+            return self.shared_head(h_last)
+
+        if fd_idx is None:
+            raise ValueError("fd_idx is required when num_fd_heads > 1.")
+        if fd_idx.ndim == 0:
+            fd_idx = fd_idx.view(1).repeat(h_last.shape[0])
+        if fd_idx.shape[0] != h_last.shape[0]:
+            raise ValueError(f"fd_idx length mismatch: {fd_idx.shape[0]} vs batch {h_last.shape[0]}")
+
+        out = self.shared_head(h_last)
+        for idx in torch.unique(fd_idx):
+            head_id = int(idx.item())
+            if head_id < 0 or head_id >= self.num_fd_heads:
+                raise ValueError(f"fd_idx={head_id} out of range [0, {self.num_fd_heads - 1}]")
+            mask = fd_idx == idx
+            if mask.any():
+                out[mask] = self.fd_heads[head_id](h_last[mask])
+        return out
 
 
 def resolve_device(device: str) -> str:
@@ -122,6 +164,76 @@ def _configure_gpu_runtime(cfg: ConvAttentionLSTMConfig, resolved_device: str) -
         torch.backends.cudnn.benchmark = True
 
 
+def _asymmetric_huber_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    delta: float,
+    late_error_weight: float,
+    late_error_margin: float,
+) -> torch.Tensor:
+    err = pred - target
+    abs_err = err.abs()
+    quad = torch.clamp(abs_err, max=delta)
+    lin = abs_err - quad
+    base = 0.5 * quad**2 + delta * lin
+    late = (err > late_error_margin).to(base.dtype)
+    weights = 1.0 + late_error_weight * late
+    return (base * weights).mean()
+
+
+def _compute_loss(cfg: ConvAttentionLSTMConfig, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    if cfg.loss_name == "mse":
+        return nn.functional.mse_loss(pred, target)
+    if cfg.loss_name == "huber_asymmetric":
+        return _asymmetric_huber_loss(
+            pred=pred,
+            target=target,
+            delta=float(cfg.huber_delta),
+            late_error_weight=float(cfg.late_error_weight),
+            late_error_margin=float(cfg.late_error_margin),
+        )
+    raise ValueError(f"Unsupported loss_name={cfg.loss_name}")
+
+
+def _build_train_loader(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    fd_train: np.ndarray | None,
+    cfg: ConvAttentionLSTMConfig,
+    use_cuda: bool,
+) -> DataLoader:
+    x_t = torch.from_numpy(x_train).float()
+    y_t = torch.from_numpy(y_train).float()
+    if fd_train is not None:
+        fd_t = torch.from_numpy(fd_train.astype(np.int64))
+        train_ds = TensorDataset(x_t, y_t, fd_t)
+    else:
+        train_ds = TensorDataset(x_t, y_t)
+
+    loader_kwargs: dict[str, object] = {
+        "batch_size": cfg.batch_size,
+        "drop_last": False,
+        "num_workers": max(0, int(cfg.num_workers)),
+        "pin_memory": bool(cfg.pin_memory and use_cuda),
+    }
+    if int(loader_kwargs["num_workers"]) > 0:
+        loader_kwargs["persistent_workers"] = True
+
+    if cfg.emphasize_failure:
+        weights = np.ones_like(y_train, dtype=np.float64)
+        weights[y_train <= float(cfg.failure_rul_threshold)] *= float(cfg.failure_weight)
+        sampler = WeightedRandomSampler(
+            weights=torch.from_numpy(weights),
+            num_samples=int(len(weights)),
+            replacement=True,
+        )
+        loader_kwargs["sampler"] = sampler
+    else:
+        loader_kwargs["shuffle"] = True
+
+    return DataLoader(train_ds, **loader_kwargs)
+
+
 def train_conv_attention_lstm_regressor(
     x_train: np.ndarray,
     y_train: np.ndarray,
@@ -129,9 +241,14 @@ def train_conv_attention_lstm_regressor(
     y_valid: np.ndarray,
     cfg: ConvAttentionLSTMConfig,
     device: str = "auto",
+    fd_train: np.ndarray | None = None,
+    fd_valid: np.ndarray | None = None,
 ) -> tuple[ConvAttentionLSTMRegressor, list[dict[str, float]], str]:
     torch.manual_seed(cfg.random_state)
     np.random.seed(cfg.random_state)
+
+    if cfg.num_fd_heads > 1 and (fd_train is None or fd_valid is None):
+        raise ValueError("fd_train and fd_valid are required when num_fd_heads > 1.")
 
     resolved_device = resolve_device(device)
     use_cuda = _is_cuda_device(resolved_device)
@@ -145,6 +262,7 @@ def train_conv_attention_lstm_regressor(
         hidden_size=cfg.hidden_size,
         num_layers=cfg.num_layers,
         dropout=cfg.dropout,
+        num_fd_heads=cfg.num_fd_heads,
     ).to(resolved_device)
 
     optimizer = torch.optim.Adam(
@@ -152,26 +270,22 @@ def train_conv_attention_lstm_regressor(
         lr=cfg.learning_rate,
         weight_decay=cfg.weight_decay,
     )
-    criterion = nn.MSELoss()
 
-    train_ds = TensorDataset(
-        torch.from_numpy(x_train).float(),
-        torch.from_numpy(y_train).float(),
+    train_loader = _build_train_loader(
+        x_train=x_train,
+        y_train=y_train,
+        fd_train=fd_train,
+        cfg=cfg,
+        use_cuda=use_cuda,
     )
-    loader_kwargs = {
-        "batch_size": cfg.batch_size,
-        "shuffle": True,
-        "drop_last": False,
-        "num_workers": max(0, int(cfg.num_workers)),
-        "pin_memory": bool(cfg.pin_memory and use_cuda),
-    }
-    if loader_kwargs["num_workers"] > 0:
-        loader_kwargs["persistent_workers"] = True
-    train_loader = DataLoader(train_ds, **loader_kwargs)
 
     copy_non_blocking = bool(cfg.non_blocking and use_cuda)
     x_valid_t = torch.from_numpy(x_valid).float().to(resolved_device, non_blocking=copy_non_blocking)
     y_valid_np = y_valid.astype(np.float32)
+    fd_valid_t = None
+    if fd_valid is not None:
+        fd_valid_t = torch.from_numpy(fd_valid.astype(np.int64)).to(resolved_device, non_blocking=copy_non_blocking)
+
     use_amp = bool(cfg.use_amp and use_cuda)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
@@ -184,14 +298,22 @@ def train_conv_attention_lstm_regressor(
         model.train()
         train_losses = []
 
-        for xb, yb in train_loader:
+        for batch in train_loader:
+            if len(batch) == 3:
+                xb, yb, fb = batch
+            else:
+                xb, yb = batch
+                fb = None
+
             xb = xb.to(resolved_device, non_blocking=copy_non_blocking)
             yb = yb.to(resolved_device, non_blocking=copy_non_blocking)
+            if fb is not None:
+                fb = fb.to(resolved_device, non_blocking=copy_non_blocking)
 
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-                pred = model(xb)
-                loss = criterion(pred, yb)
+                pred = model(xb, fd_idx=fb)
+                loss = _compute_loss(cfg, pred, yb)
             if use_amp:
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -203,7 +325,7 @@ def train_conv_attention_lstm_regressor(
 
         model.eval()
         with torch.no_grad():
-            y_valid_pred = model(x_valid_t).detach().cpu().numpy()
+            y_valid_pred = model(x_valid_t, fd_idx=fd_valid_t).detach().cpu().numpy()
 
         valid_rmse = float(np.sqrt(np.mean((y_valid_np - y_valid_pred) ** 2)))
         valid_mae = float(np.mean(np.abs(y_valid_np - y_valid_pred)))
@@ -254,6 +376,7 @@ def predict_conv_attention_lstm(
     device: str,
     non_blocking: bool = False,
     pin_memory: bool | None = None,
+    fd_idx: int | np.ndarray | None = None,
 ) -> np.ndarray:
     model.eval()
     use_cuda = _is_cuda_device(device)
@@ -261,14 +384,33 @@ def predict_conv_attention_lstm(
     use_pin_memory = bool(use_cuda if pin_memory is None else (pin_memory and use_cuda))
 
     x_t = torch.from_numpy(x).float()
-    ds = TensorDataset(x_t)
+    if model.num_fd_heads > 1:
+        if fd_idx is None:
+            raise ValueError("fd_idx is required for predict_conv_attention_lstm when num_fd_heads > 1.")
+        if isinstance(fd_idx, np.ndarray):
+            if len(fd_idx) != len(x):
+                raise ValueError(f"fd_idx length mismatch: {len(fd_idx)} vs {len(x)}")
+            fd_arr = fd_idx.astype(np.int64)
+        else:
+            fd_arr = np.full(len(x), int(fd_idx), dtype=np.int64)
+        fd_t = torch.from_numpy(fd_arr)
+        ds = TensorDataset(x_t, fd_t)
+    else:
+        ds = TensorDataset(x_t)
+
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, drop_last=False, pin_memory=use_pin_memory)
 
     preds = []
     with torch.no_grad():
-        for (xb,) in loader:
+        for batch in loader:
+            if len(batch) == 2:
+                xb, fb = batch
+                fb = fb.to(device, non_blocking=copy_non_blocking)
+            else:
+                (xb,) = batch
+                fb = None
             xb = xb.to(device, non_blocking=copy_non_blocking)
-            preds.append(model(xb).detach().cpu().numpy())
+            preds.append(model(xb, fd_idx=fb).detach().cpu().numpy())
     return np.concatenate(preds, axis=0)
 
 
@@ -283,6 +425,7 @@ def save_conv_attention_lstm_checkpoint(model: ConvAttentionLSTMRegressor, path:
             "hidden_size": model.hidden_size,
             "num_layers": model.num_layers,
             "dropout": model.dropout,
+            "num_fd_heads": model.num_fd_heads,
         },
     }
     torch.save(payload, path)
@@ -303,6 +446,7 @@ def load_conv_attention_lstm_checkpoint(path: str, device: str = "auto") -> tupl
         hidden_size=int(arch["hidden_size"]),
         num_layers=int(arch["num_layers"]),
         dropout=float(arch["dropout"]),
+        num_fd_heads=int(arch.get("num_fd_heads", 1)),
     ).to(resolved_device)
     model.load_state_dict(ckpt["state_dict"])
     model.eval()

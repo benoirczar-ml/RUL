@@ -83,6 +83,10 @@ Ten model laczy:
 - `Conv1D`: lokalne wzorce czasowe,
 - `MultiHeadAttention`: zaleznosci miedzy krokami sekwencji,
 - `LSTM`: trend degradacji i pamiec czasowa.
+Wersja v2 treningu:
+- `FD-specific head`: osobna koncowka regresyjna per `FD001..FD004`,
+- `huber_asymmetric`: mocniejsza kara za zbyt optymistyczne (spoznione) predykcje,
+- `emphasize_failure`: oversampling okien blisko awarii.
 
 Szybki smoke:
 ```bash
