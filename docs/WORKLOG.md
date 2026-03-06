@@ -21,3 +21,14 @@
   - `benchmark_models.py` (RMSE/MAE/PHM score na zbiorze testowym).
 - Dodano konfiguracje `config/train_lstm.json`.
 - Dodano test `tests/test_sequence.py`.
+
+## 2026-03-06 - Full test (FD001..FD004) + wnioski po 2 modelach
+- Uruchomiono pelny benchmark dla 2 modeli:
+  - `HistGradientBoostingRegressor`
+  - `LSTMRegressor`
+- Zakres: `FD001`, `FD002`, `FD003`, `FD004`.
+- Wynik: `LSTM` lepszy od baseline na wszystkich 4 zbiorach (RMSE/MAE/PHM score).
+- Interpretacja etapu:
+  - to nie jest jeszcze finalny poziom produkcyjny,
+  - to mocny etap PoC pokazujacy kierunek (model sekwencyjny > baseline).
+- Kolejny etap: dopracowanie modelu i walidacji (dalszy tuning + kolejne architektury).

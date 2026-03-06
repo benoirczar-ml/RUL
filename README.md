@@ -82,6 +82,15 @@ python benchmark_models.py \
   --output-json outputs/benchmark_fd001.json
 ```
 
+## Status po 2 modelach (aktualny etap)
+- Sprawdzone modele:
+  - `HistGradientBoostingRegressor` (baseline)
+  - `LSTMRegressor` (sekwencyjny)
+- Pelny test wykonany na `FD001..FD004`.
+- W tym etapie `LSTM` wygrywa z baseline na wszystkich 4 zbiorach.
+- To jest etap **PoC/portfolio**, nie finalny system produkcyjny lotniczy.
+- Model bedzie dalej dopracowywany (kolejne architektury, tuning, ostrzejsza walidacja).
+
 ## Testy
 ```bash
 python -m pytest -q
