@@ -82,6 +82,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Enable cuDNN benchmark autotuning.",
     )
+    parser.add_argument(
+        "--log-every-epoch",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Print one metrics line per epoch.",
+    )
     parser.add_argument("--val-strategy", choices=["truncation", "last_cycle"], default=None, help="Validation strategy.")
     parser.add_argument("--val-min-prefix", type=int, default=None, help="Min observed cycles in truncation validation.")
     parser.add_argument("--model-dir", default=None, help="Output model directory.")
@@ -196,6 +202,7 @@ def main() -> None:
         use_amp=bool(_pick(args.use_amp, cfg_data, "use_amp", True)),
         enable_tf32=bool(_pick(args.enable_tf32, cfg_data, "enable_tf32", True)),
         cudnn_benchmark=bool(_pick(args.cudnn_benchmark, cfg_data, "cudnn_benchmark", True)),
+        log_every_epoch=bool(_pick(args.log_every_epoch, cfg_data, "log_every_epoch", True)),
     )
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -276,6 +283,7 @@ def main() -> None:
                 "use_amp": model_cfg.use_amp,
                 "enable_tf32": model_cfg.enable_tf32,
                 "cudnn_benchmark": model_cfg.cudnn_benchmark,
+                "log_every_epoch": model_cfg.log_every_epoch,
                 "seed": seed,
                 "val_fraction": val_fraction,
                 "sample_step": sample_step,

@@ -1,0 +1,21 @@
+{
+  "data_dir": "RULdata/CMAPSSData",
+  "fds": ["FD001", "FD002", "FD003", "FD004"],
+  "grid": {
+    "epochs": [12],
+    "patience": [3],
+    "sample_step": [1],
+    "batch_size": [256],
+    "device": ["cuda"],
+    "num_workers": [2],
+    "conv_channels": [96, 128],
+    "kernel_size": [3, 5],
+    "attention_heads": [4],
+    "hidden_size": [96],
+    "num_layers": [2],
+    "dropout": [0.2],
+    "learning_rate": [0.001],
+    "weight_decay": [1e-05],
+    "log_every_epoch": [true]
+  }
+}

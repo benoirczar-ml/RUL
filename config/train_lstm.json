@@ -22,5 +22,6 @@
   "non_blocking": true,
   "use_amp": true,
   "enable_tf32": true,
-  "cudnn_benchmark": true
+  "cudnn_benchmark": true,
+  "log_every_epoch": true
 }

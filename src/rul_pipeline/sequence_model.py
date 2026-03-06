@@ -26,6 +26,7 @@ class LSTMConfig:
     use_amp: bool = True
     enable_tf32: bool = True
     cudnn_benchmark: bool = True
+    log_every_epoch: bool = True
 
 
 class LSTMRegressor(nn.Module):
@@ -172,14 +173,28 @@ def train_lstm_regressor(
             }
         )
 
-        if valid_rmse < best_rmse:
+        improved = valid_rmse < best_rmse
+        if improved:
             best_rmse = valid_rmse
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             no_improve = 0
         else:
             no_improve += 1
-            if no_improve >= cfg.patience:
-                break
+
+        if cfg.log_every_epoch:
+            print(
+                f"epoch {epoch:03d}/{cfg.epochs:03d} "
+                f"train_loss={train_loss:.6f} "
+                f"valid_rmse={valid_rmse:.6f} "
+                f"valid_mae={valid_mae:.6f} "
+                f"best_rmse={best_rmse:.6f} "
+                f"patience={no_improve}/{cfg.patience} "
+                f"improved={'yes' if improved else 'no'}",
+                flush=True,
+            )
+
+        if no_improve >= cfg.patience:
+            break
 
     if best_state is not None:
         model.load_state_dict(best_state)

@@ -68,6 +68,7 @@ python train_sequence.py \
   --enable-tf32 \
   --cudnn-benchmark
 ```
+Epokowe logi (1 linia na epoke): `--log-every-epoch` (wylaczenie: `--no-log-every-epoch`)
 
 Szybki smoke/benchmark sciezki GPU transfer + AMP/TF32/cuDNN:
 ```bash
@@ -93,6 +94,7 @@ python train_hybrid_sequence.py \
   --device cuda \
   --model-dir models/caelstm_smoke_fd001
 ```
+Epokowe logi (1 linia na epoke): `--log-every-epoch` (wylaczenie: `--no-log-every-epoch`)
 
 ## Predykcja testu
 1. Wybierz katalog modelu, np. `models/hist_gbr_FD001_YYYYMMDD_HHMMSS`
@@ -236,6 +238,14 @@ To raportuje rozrzut metryk po wielu seedach obciecia trajektorii.
   - Wynik: LSTM lepszy na wszystkich 4 zbiorach.
 - Uwaga metodologiczna: tuning pokazal, ze `best_by_val` i `best_by_test` czesto sie rozjezdzaja, wiec kolejny krok to walidacja jeszcze bardziej zblizona do testu (symulacja obcietych trajektorii).
   - (wdrozone) walidacja pseudo-testowa oparta o obciete trajektorie (`truncation`).
+
+## Tuning hybrydy (Conv + Attention + LSTM)
+```bash
+python tune_hybrid.py --config config/tune_hybrid.json
+```
+Artefakty:
+- `outputs/tuning_hybrid/hybrid_tuning_FD001.csv` ... `hybrid_tuning_FD004.csv`
+- `outputs/tuning_hybrid/hybrid_tuning_all_fd.csv`
 
 ## Jak to komunikowac
 - Projekt mozna bezpiecznie pokazywac rekruterom i zespolom ML jako mocny PoC end-to-end.
