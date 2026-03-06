@@ -3,6 +3,7 @@
   "fd": "FD001",
   "max_rul": 125,
   "val_fraction": 0.2,
+  "val_last_cycle_only": true,
   "seed": 42,
   "seq_len": 30,
   "sample_step": 1,
@@ -16,4 +17,3 @@
   "patience": 3,
   "device": "auto"
 }
-

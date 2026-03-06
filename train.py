@@ -44,6 +44,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-depth", type=int, default=None, help="HistGBR max_depth.")
     parser.add_argument("--min-samples-leaf", type=int, default=None, help="HistGBR min_samples_leaf.")
     parser.add_argument("--l2-regularization", type=float, default=None, help="HistGBR l2_regularization.")
+    parser.add_argument(
+        "--val-last-cycle-only",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use only last cycle per validation unit for primary validation metrics (default: true).",
+    )
     parser.add_argument("--model-dir", default=None, help="Output model directory.")
     return parser.parse_args()
 
@@ -58,6 +64,7 @@ def main() -> None:
     max_rul = int(_pick(args.max_rul, cfg_data, "max_rul", 125))
     val_fraction = float(_pick(args.val_fraction, cfg_data, "val_fraction", 0.2))
     seed = int(_pick(args.seed, cfg_data, "seed", 42))
+    val_last_cycle_only = bool(_pick(args.val_last_cycle_only, cfg_data, "val_last_cycle_only", True))
 
     model_cfg = HistGBRConfig(
         max_iter=int(_pick(args.max_iter, cfg_data, "max_iter", 400)),
@@ -86,8 +93,12 @@ def main() -> None:
     if not train_units:
         raise ValueError("Validation split consumed all units. Lower --val-fraction.")
 
-    train_df = train_with_target[train_with_target["unit"].isin(train_units)]
-    valid_df = train_with_target[train_with_target["unit"].isin(val_units)]
+    train_df = train_with_target[train_with_target["unit"].isin(train_units)].sort_values(["unit", "cycle"]).reset_index(
+        drop=True
+    )
+    valid_df = train_with_target[train_with_target["unit"].isin(val_units)].sort_values(["unit", "cycle"]).reset_index(
+        drop=True
+    )
 
     X_train = build_features(train_df)
     y_train = train_df["rul"].astype("float32")
@@ -95,13 +106,22 @@ def main() -> None:
     y_valid = valid_df["rul"].astype("float32")
 
     model = train_hist_gbr(X_train, y_train, model_cfg)
-    pred_valid = predict(model, X_valid)
-
-    metrics = {
-        "rmse": rmse(y_valid.to_numpy(), pred_valid),
-        "mae": mae(y_valid.to_numpy(), pred_valid),
-        "phm_score": phm_score(y_valid.to_numpy(), pred_valid),
+    pred_valid_all = predict(model, X_valid)
+    metrics_all = {
+        "rmse": rmse(y_valid.to_numpy(), pred_valid_all),
+        "mae": mae(y_valid.to_numpy(), pred_valid_all),
+        "phm_score": phm_score(y_valid.to_numpy(), pred_valid_all),
     }
+
+    last_idx = valid_df.groupby("unit")["cycle"].idxmax().to_numpy()
+    y_valid_last = valid_df.loc[last_idx, "rul"].to_numpy(dtype=np.float32)
+    pred_valid_last = pred_valid_all[last_idx]
+    metrics_last = {
+        "rmse": rmse(y_valid_last, pred_valid_last),
+        "mae": mae(y_valid_last, pred_valid_last),
+        "phm_score": phm_score(y_valid_last, pred_valid_last),
+    }
+    metrics_primary = metrics_last if val_last_cycle_only else metrics_all
 
     model_path = model_dir / "model.joblib"
     meta_path = model_dir / "metadata.json"
@@ -119,7 +139,9 @@ def main() -> None:
             "valid_rows": int(len(valid_df)),
             "train_units": int(len(train_units)),
             "valid_units": int(len(val_units)),
-            "metrics_valid": metrics,
+            "metrics_valid": metrics_primary,
+            "metrics_valid_last_cycle": metrics_last,
+            "metrics_valid_all_cycles": metrics_all,
             "params": {
                 "max_iter": model_cfg.max_iter,
                 "learning_rate": model_cfg.learning_rate,
@@ -128,14 +150,16 @@ def main() -> None:
                 "l2_regularization": model_cfg.l2_regularization,
                 "seed": seed,
                 "val_fraction": val_fraction,
+                "val_last_cycle_only": val_last_cycle_only,
             },
         },
     )
 
     print(f"Model directory: {model_dir}")
-    print(f"Validation RMSE: {metrics['rmse']:.4f}")
-    print(f"Validation MAE: {metrics['mae']:.4f}")
-    print(f"Validation PHM score: {metrics['phm_score']:.4f}")
+    print(f"Validation mode: {'last_cycle' if val_last_cycle_only else 'all_cycles'}")
+    print(f"Validation RMSE: {metrics_primary['rmse']:.4f}")
+    print(f"Validation MAE: {metrics_primary['mae']:.4f}")
+    print(f"Validation PHM score: {metrics_primary['phm_score']:.4f}")
 
 
 if __name__ == "__main__":

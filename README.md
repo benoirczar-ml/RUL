@@ -39,6 +39,7 @@ python -m pip install -r requirements.txt
 ```bash
 python train.py
 ```
+Domyslnie walidacja jest liczona na ostatnim cyklu dla kazdej jednostki (`val_last_cycle_only=true`), zeby odpowiadala celowi testowemu C-MAPSS.
 
 Przyklad nadpisania parametrow:
 ```bash
@@ -49,6 +50,7 @@ python train.py --fd FD002 --max-rul 130 --max-iter 500
 ```bash
 python train_sequence.py
 ```
+Domyslnie early stopping i metryki walidacyjne sa liczone na ostatnim cyklu (`val_last_cycle_only=true`).
 
 Szybki smoke:
 ```bash
@@ -90,6 +92,12 @@ python benchmark_models.py \
 - W tym etapie `LSTM` wygrywa z baseline na wszystkich 4 zbiorach.
 - To jest etap **PoC/portfolio**, nie finalny system produkcyjny lotniczy.
 - Model bedzie dalej dopracowywany (kolejne architektury, tuning, ostrzejsza walidacja).
+- Aktualny punkt odniesienia (full_v2, walidacja `last_cycle_only=true`):
+  - FD001: LSTM RMSE `67.94` vs HistGBR `86.30`
+  - FD002: LSTM RMSE `95.07` vs HistGBR `98.46`
+  - FD003: LSTM RMSE `60.94` vs HistGBR `84.02`
+  - FD004: LSTM RMSE `99.28` vs HistGBR `103.20`
+  - Wynik: LSTM lepszy na wszystkich 4 zbiorach.
 
 ## Testy
 ```bash
