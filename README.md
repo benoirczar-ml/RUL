@@ -74,6 +74,26 @@ Szybki smoke/benchmark sciezki GPU transfer + AMP/TF32/cuDNN:
 python scripts/gpu_runtime_smoke.py --device auto --output-json outputs/gpu_runtime_smoke.json
 ```
 
+## Trening hybrydowy (Conv + Attention + LSTM)
+```bash
+python train_hybrid_sequence.py
+```
+Ten model laczy:
+- `Conv1D`: lokalne wzorce czasowe,
+- `MultiHeadAttention`: zaleznosci miedzy krokami sekwencji,
+- `LSTM`: trend degradacji i pamiec czasowa.
+
+Szybki smoke:
+```bash
+python train_hybrid_sequence.py \
+  --fd FD001 \
+  --epochs 2 \
+  --sample-step 3 \
+  --val-fraction 0.1 \
+  --device cuda \
+  --model-dir models/caelstm_smoke_fd001
+```
+
 ## Predykcja testu
 1. Wybierz katalog modelu, np. `models/hist_gbr_FD001_YYYYMMDD_HHMMSS`
 ```bash
@@ -82,7 +102,7 @@ python predict.py \
   --fd FD001 \
   --output-csv outputs/predictions_fd001.csv
 ```
-`predict.py` dziala zarowno dla `hist_gbr`, jak i `lstm_regressor`.
+`predict.py` dziala dla `hist_gbr`, `lstm_regressor` i `conv_attn_lstm_regressor`.
 
 ## Ewaluacja na `RUL_FDxxx.txt`
 ```bash

@@ -7,6 +7,7 @@ import pandas as pd
 
 from .data import load_split
 from .features import build_features
+from .hybrid_sequence_model import load_conv_attention_lstm_checkpoint, predict_conv_attention_lstm
 from .io_utils import read_json
 from .modeling import load_model, predict as predict_hist
 from .sequence import apply_window_standardizer, build_sequence_samples
@@ -53,6 +54,43 @@ def _predict_on_dataframe(
         model, resolved_device = load_lstm_checkpoint(str(model_dir / "model.pt"), device=device)
         batch_size = int(metadata["params"].get("batch_size", 256))
         y_pred = predict_lstm(model, x_seq, batch_size=batch_size, device=resolved_device)
+
+        cycles = df_sorted["cycle"].astype(int).to_numpy()
+        if len(units) != len(cycles):
+            raise ValueError(
+                f"Sequence prediction size mismatch: units={len(units)} cycles={len(cycles)} "
+                f"for model {model_dir}"
+            )
+        out = pd.DataFrame({"unit": units.astype(int), "cycle": cycles, "pred_rul": y_pred.astype(float)})
+        return out
+
+    if model_type == "conv_attn_lstm_regressor":
+        feature_cols = metadata["feature_columns"]
+        seq_len = int(metadata["seq_len"])
+        x_seq, _, units = build_sequence_samples(
+            x_all[feature_cols],
+            units=df_sorted["unit"].to_numpy(),
+            targets=None,
+            seq_len=seq_len,
+            sample_step=1,
+            last_only=False,
+        )
+        mean = np.asarray(metadata["scaler_mean"], dtype=np.float32)
+        std = np.asarray(metadata["scaler_std"], dtype=np.float32)
+        x_seq = apply_window_standardizer(x_seq, mean, std)
+
+        model, resolved_device = load_conv_attention_lstm_checkpoint(str(model_dir / "model.pt"), device=device)
+        batch_size = int(metadata["params"].get("batch_size", 256))
+        use_non_blocking = bool(metadata["params"].get("non_blocking", False))
+        use_pin_memory = bool(metadata["params"].get("pin_memory", True))
+        y_pred = predict_conv_attention_lstm(
+            model,
+            x_seq,
+            batch_size=batch_size,
+            device=resolved_device,
+            non_blocking=use_non_blocking,
+            pin_memory=use_pin_memory,
+        )
 
         cycles = df_sorted["cycle"].astype(int).to_numpy()
         if len(units) != len(cycles):
