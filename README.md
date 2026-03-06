@@ -84,6 +84,13 @@ python benchmark_models.py \
   --output-json outputs/benchmark_fd001.json
 ```
 
+## Tuning LSTM
+```bash
+python tune_lstm.py --config config/tune_lstm.json --max-trials 6
+```
+Wyniki zapisywane sa do `outputs/tuning/` (ranking per FD + plik zbiorczy).
+Aktualny przebieg: `outputs/tuning_v1/`.
+
 ## Status po 2 modelach (aktualny etap)
 - Sprawdzone modele:
   - `HistGradientBoostingRegressor` (baseline)
@@ -98,6 +105,7 @@ python benchmark_models.py \
   - FD003: LSTM RMSE `60.94` vs HistGBR `84.02`
   - FD004: LSTM RMSE `99.28` vs HistGBR `103.20`
   - Wynik: LSTM lepszy na wszystkich 4 zbiorach.
+  - Uwaga metodologiczna: tuning pokazal, ze `best_by_val` i `best_by_test` czesto sie rozjezdzaja, wiec kolejny krok to walidacja jeszcze bardziej zblizona do testu (symulacja obcietych trajektorii).
 
 ## Testy
 ```bash

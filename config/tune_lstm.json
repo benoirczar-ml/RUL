@@ -1,0 +1,17 @@
+{
+  "data_dir": "RULdata/CMAPSSData",
+  "fds": ["FD001", "FD002", "FD003", "FD004"],
+  "grid": {
+    "seq_len": [20, 30, 40],
+    "hidden_size": [96, 128],
+    "dropout": [0.1, 0.2],
+    "learning_rate": [0.001, 0.0005],
+    "num_layers": [2],
+    "batch_size": [256],
+    "epochs": [12],
+    "patience": [3],
+    "sample_step": [1],
+    "max_rul": [125]
+  }
+}
+

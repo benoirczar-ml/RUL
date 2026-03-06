@@ -46,3 +46,15 @@
   - FD003: LSTM 60.94 vs HistGBR 84.02
   - FD004: LSTM 99.28 vs HistGBR 103.20
   - Wniosek: LSTM nadal wygrywa 4/4.
+
+## 2026-03-06 - Start etapu tuning LSTM
+- Dodano `tune_lstm.py` do automatycznego searchu hiperparametrow.
+- Dodano `config/tune_lstm.json` (grid search).
+- Ranking metryk zapisywany per-FD i globalnie do `outputs/tuning/`.
+- Uruchomiono tuning `tuning_v1` (`max-trials=4`):
+  - wyrazna poprawa `best_by_test` na FD001/FD003/FD004 wzgledem poprzedniego `full_v2`,
+  - mocna poprawa na FD002 i FD004 juz w smoke.
+- Ważny wniosek:
+  - `best_by_val` i `best_by_test` czesto sa rozne,
+  - wskazuje to na niedopasowanie walidacji do dystrybucji testowej,
+  - kolejny etap: walidacja pseudo-testowa (truncation-based).
