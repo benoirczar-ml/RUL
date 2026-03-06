@@ -12,7 +12,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from rul_pipeline.data import add_train_rul, load_split
+from rul_pipeline.data import add_train_rul, build_truncated_validation, load_split
 from rul_pipeline.features import build_features, feature_columns
 from rul_pipeline.io_utils import ensure_dir, read_json, write_json
 from rul_pipeline.metrics import mae, phm_score, rmse
@@ -51,12 +51,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=None, help="Batch size.")
     parser.add_argument("--patience", type=int, default=None, help="Early stopping patience.")
     parser.add_argument("--device", default=None, help="auto/cpu/cuda.")
-    parser.add_argument(
-        "--val-last-cycle-only",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Use last-cycle validation windows for early stopping and primary metrics (default: true).",
-    )
+    parser.add_argument("--val-strategy", choices=["truncation", "last_cycle"], default=None, help="Validation strategy.")
+    parser.add_argument("--val-min-prefix", type=int, default=None, help="Min observed cycles in truncation validation.")
     parser.add_argument("--model-dir", default=None, help="Output model directory.")
     return parser.parse_args()
 
@@ -74,7 +70,8 @@ def main() -> None:
     seq_len = int(_pick(args.seq_len, cfg_data, "seq_len", 30))
     sample_step = int(_pick(args.sample_step, cfg_data, "sample_step", 1))
     device = _pick(args.device, cfg_data, "device", "auto")
-    val_last_cycle_only = bool(_pick(args.val_last_cycle_only, cfg_data, "val_last_cycle_only", True))
+    val_strategy = str(_pick(args.val_strategy, cfg_data, "val_strategy", "truncation"))
+    val_min_prefix = int(_pick(args.val_min_prefix, cfg_data, "val_min_prefix", 20))
 
     train_raw = load_split(_resolve(data_dir), fd_id=fd, split="train")
     train_with_target = add_train_rul(train_raw, max_rul=max_rul)
@@ -91,12 +88,25 @@ def main() -> None:
     train_df = train_with_target[train_with_target["unit"].isin(train_units)].sort_values(["unit", "cycle"]).reset_index(
         drop=True
     )
-    valid_df = train_with_target[train_with_target["unit"].isin(val_units)].sort_values(["unit", "cycle"]).reset_index(
+    valid_df_full = train_with_target[train_with_target["unit"].isin(val_units)].sort_values(["unit", "cycle"]).reset_index(
         drop=True
     )
 
+    if val_strategy == "truncation":
+        valid_df_eval, valid_cuts = build_truncated_validation(
+            valid_df_full,
+            min_prefix_cycles=val_min_prefix,
+            random_state=seed,
+        )
+    elif val_strategy == "last_cycle":
+        valid_df_eval = valid_df_full.copy()
+        valid_cuts = None
+    else:
+        raise ValueError(f"Unsupported val_strategy={val_strategy}")
+
     x_train_tab = build_features(train_df)
-    x_valid_tab = build_features(valid_df)
+    x_valid_eval_tab = build_features(valid_df_eval)
+    x_valid_full_tab = build_features(valid_df_full)
     feat_cols = feature_columns()
 
     x_train_seq, y_train_seq, _ = build_sequence_samples(
@@ -107,18 +117,26 @@ def main() -> None:
         sample_step=sample_step,
         last_only=False,
     )
-    x_valid_seq, y_valid_seq, _ = build_sequence_samples(
-        x_valid_tab[feat_cols],
-        units=valid_df["unit"].to_numpy(),
-        targets=valid_df["rul"].to_numpy(),
+    x_valid_eval_seq, y_valid_eval_seq, _ = build_sequence_samples(
+        x_valid_eval_tab[feat_cols],
+        units=valid_df_eval["unit"].to_numpy(),
+        targets=valid_df_eval["rul"].to_numpy(),
         seq_len=seq_len,
         sample_step=1,
         last_only=False,
     )
-    x_valid_last_seq, y_valid_last_seq, _ = build_sequence_samples(
-        x_valid_tab[feat_cols],
-        units=valid_df["unit"].to_numpy(),
-        targets=valid_df["rul"].to_numpy(),
+    x_valid_eval_last_seq, y_valid_eval_last_seq, _ = build_sequence_samples(
+        x_valid_eval_tab[feat_cols],
+        units=valid_df_eval["unit"].to_numpy(),
+        targets=valid_df_eval["rul"].to_numpy(),
+        seq_len=seq_len,
+        sample_step=1,
+        last_only=True,
+    )
+    x_valid_full_last_seq, y_valid_full_last_seq, _ = build_sequence_samples(
+        x_valid_full_tab[feat_cols],
+        units=valid_df_full["unit"].to_numpy(),
+        targets=valid_df_full["rul"].to_numpy(),
         seq_len=seq_len,
         sample_step=1,
         last_only=True,
@@ -126,8 +144,9 @@ def main() -> None:
 
     mean, std = fit_window_standardizer(x_train_seq)
     x_train_seq = apply_window_standardizer(x_train_seq, mean, std)
-    x_valid_seq = apply_window_standardizer(x_valid_seq, mean, std)
-    x_valid_last_seq = apply_window_standardizer(x_valid_last_seq, mean, std)
+    x_valid_eval_seq = apply_window_standardizer(x_valid_eval_seq, mean, std)
+    x_valid_eval_last_seq = apply_window_standardizer(x_valid_eval_last_seq, mean, std)
+    x_valid_full_last_seq = apply_window_standardizer(x_valid_full_last_seq, mean, std)
 
     model_cfg = LSTMConfig(
         input_size=x_train_seq.shape[2],
@@ -150,24 +169,25 @@ def main() -> None:
     model, history, resolved_device = train_lstm_regressor(
         x_train_seq,
         y_train_seq,
-        x_valid_last_seq if val_last_cycle_only else x_valid_seq,
-        y_valid_last_seq if val_last_cycle_only else y_valid_seq,
+        x_valid_eval_last_seq,
+        y_valid_eval_last_seq,
         cfg=model_cfg,
         device=device,
     )
-    pred_valid_all = predict_lstm(model, x_valid_seq, batch_size=model_cfg.batch_size, device=resolved_device)
-    pred_valid_last = predict_lstm(model, x_valid_last_seq, batch_size=model_cfg.batch_size, device=resolved_device)
-    metrics_all = {
-        "rmse": rmse(y_valid_seq, pred_valid_all),
-        "mae": mae(y_valid_seq, pred_valid_all),
-        "phm_score": phm_score(y_valid_seq, pred_valid_all),
+    pred_valid_eval = predict_lstm(model, x_valid_eval_last_seq, batch_size=model_cfg.batch_size, device=resolved_device)
+    pred_valid_full_last = predict_lstm(
+        model, x_valid_full_last_seq, batch_size=model_cfg.batch_size, device=resolved_device
+    )
+    metrics_primary = {
+        "rmse": rmse(y_valid_eval_last_seq, pred_valid_eval),
+        "mae": mae(y_valid_eval_last_seq, pred_valid_eval),
+        "phm_score": phm_score(y_valid_eval_last_seq, pred_valid_eval),
     }
-    metrics_last = {
-        "rmse": rmse(y_valid_last_seq, pred_valid_last),
-        "mae": mae(y_valid_last_seq, pred_valid_last),
-        "phm_score": phm_score(y_valid_last_seq, pred_valid_last),
+    metrics_full_last = {
+        "rmse": rmse(y_valid_full_last_seq, pred_valid_full_last),
+        "mae": mae(y_valid_full_last_seq, pred_valid_full_last),
+        "phm_score": phm_score(y_valid_full_last_seq, pred_valid_full_last),
     }
-    metrics_primary = metrics_last if val_last_cycle_only else metrics_all
 
     save_lstm_checkpoint(model, str(model_dir / "model.pt"))
     write_json(
@@ -182,15 +202,15 @@ def main() -> None:
             "scaler_mean": mean.tolist(),
             "scaler_std": std.tolist(),
             "train_rows": int(len(train_df)),
-            "valid_rows": int(len(valid_df)),
+            "valid_rows": int(len(valid_df_full)),
+            "valid_eval_rows": int(len(valid_df_eval)),
             "train_units": int(len(train_units)),
             "valid_units": int(len(val_units)),
             "train_windows": int(len(x_train_seq)),
-            "valid_windows": int(len(x_valid_seq)),
-            "valid_last_cycle_windows": int(len(x_valid_last_seq)),
+            "valid_eval_windows": int(len(x_valid_eval_seq)),
+            "valid_eval_last_cycle_windows": int(len(x_valid_eval_last_seq)),
             "metrics_valid": metrics_primary,
-            "metrics_valid_last_cycle": metrics_last,
-            "metrics_valid_all_cycles": metrics_all,
+            "metrics_valid_full_last_cycle": metrics_full_last,
             "history": history,
             "params": {
                 "hidden_size": model_cfg.hidden_size,
@@ -205,14 +225,16 @@ def main() -> None:
                 "val_fraction": val_fraction,
                 "sample_step": sample_step,
                 "device": resolved_device,
-                "val_last_cycle_only": val_last_cycle_only,
+                "val_strategy": val_strategy,
+                "val_min_prefix": val_min_prefix,
             },
+            "validation_cuts": valid_cuts.to_dict(orient="records") if valid_cuts is not None else [],
         },
     )
 
     print(f"Model directory: {model_dir}")
     print(f"Device: {resolved_device}")
-    print(f"Validation mode: {'last_cycle' if val_last_cycle_only else 'all_cycles'}")
+    print(f"Validation strategy: {val_strategy}")
     print(f"Validation RMSE: {metrics_primary['rmse']:.4f}")
     print(f"Validation MAE: {metrics_primary['mae']:.4f}")
     print(f"Validation PHM score: {metrics_primary['phm_score']:.4f}")

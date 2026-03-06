@@ -58,3 +58,27 @@
   - `best_by_val` i `best_by_test` czesto sa rozne,
   - wskazuje to na niedopasowanie walidacji do dystrybucji testowej,
   - kolejny etap: walidacja pseudo-testowa (truncation-based).
+
+## 2026-03-06 - Walidacja pseudo-testowa (truncation-based)
+- Dodano generator walidacji obcietej:
+  - `build_truncated_validation` w `src/rul_pipeline/data.py`.
+- `train.py` i `train_sequence.py` przelaczone na domyslne:
+  - `val_strategy=truncation`,
+  - `val_min_prefix=20`.
+- Metadane modeli zawieraja teraz:
+  - `metrics_valid` (metryki na walidacji pseudo-testowej),
+  - `metrics_valid_full_last_cycle` (metryki pomocnicze na pelnym last-cycle),
+  - `validation_cuts` (jak obcieto kazda jednostke).
+
+## 2026-03-06 - Tuning v2 na walidacji truncation
+- Uruchomiono `tune_lstm.py --max-trials 4` z nowym protokolem walidacji.
+- Artefakty:
+  - `outputs/tuning_v2_trunc/lstm_tuning_all_fd.csv`
+  - `outputs/tuning_v2_trunc/lstm_tuning_all_fd.json`
+  - `outputs/tuning_v2_trunc/selected_vs_hist_baseline.csv`
+- Najlepsze triale (wybor po walidacji) vs baseline HistGBR:
+  - FD001: 40.98 vs 86.30 (RMSE)
+  - FD002: 54.01 vs 98.46 (RMSE)
+  - FD003: 42.32 vs 84.02 (RMSE)
+  - FD004: 54.57 vs 103.20 (RMSE)
+- Wniosek: po urealnieniu walidacji i tuningu LSTM jest wyraznie lepszy od baseline 4/4.

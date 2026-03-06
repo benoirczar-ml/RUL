@@ -6,13 +6,14 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from rul_pipeline.data import add_train_rul, load_split
+from rul_pipeline.data import add_train_rul, build_truncated_validation, load_split
 from rul_pipeline.features import build_features, feature_columns
 from rul_pipeline.io_utils import ensure_dir, read_json, write_json
 from rul_pipeline.metrics import mae, phm_score, rmse
@@ -44,12 +45,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-depth", type=int, default=None, help="HistGBR max_depth.")
     parser.add_argument("--min-samples-leaf", type=int, default=None, help="HistGBR min_samples_leaf.")
     parser.add_argument("--l2-regularization", type=float, default=None, help="HistGBR l2_regularization.")
-    parser.add_argument(
-        "--val-last-cycle-only",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Use only last cycle per validation unit for primary validation metrics (default: true).",
-    )
+    parser.add_argument("--val-strategy", choices=["truncation", "last_cycle"], default=None, help="Validation strategy.")
+    parser.add_argument("--val-min-prefix", type=int, default=None, help="Min observed cycles in truncation validation.")
     parser.add_argument("--model-dir", default=None, help="Output model directory.")
     return parser.parse_args()
 
@@ -64,7 +61,8 @@ def main() -> None:
     max_rul = int(_pick(args.max_rul, cfg_data, "max_rul", 125))
     val_fraction = float(_pick(args.val_fraction, cfg_data, "val_fraction", 0.2))
     seed = int(_pick(args.seed, cfg_data, "seed", 42))
-    val_last_cycle_only = bool(_pick(args.val_last_cycle_only, cfg_data, "val_last_cycle_only", True))
+    val_strategy = str(_pick(args.val_strategy, cfg_data, "val_strategy", "truncation"))
+    val_min_prefix = int(_pick(args.val_min_prefix, cfg_data, "val_min_prefix", 20))
 
     model_cfg = HistGBRConfig(
         max_iter=int(_pick(args.max_iter, cfg_data, "max_iter", 400)),
@@ -96,32 +94,46 @@ def main() -> None:
     train_df = train_with_target[train_with_target["unit"].isin(train_units)].sort_values(["unit", "cycle"]).reset_index(
         drop=True
     )
-    valid_df = train_with_target[train_with_target["unit"].isin(val_units)].sort_values(["unit", "cycle"]).reset_index(
+    valid_df_full = train_with_target[train_with_target["unit"].isin(val_units)].sort_values(["unit", "cycle"]).reset_index(
         drop=True
     )
 
     X_train = build_features(train_df)
     y_train = train_df["rul"].astype("float32")
-    X_valid = build_features(valid_df)
-    y_valid = valid_df["rul"].astype("float32")
+
+    if val_strategy == "truncation":
+        valid_df_eval, valid_cuts = build_truncated_validation(
+            valid_df_full,
+            min_prefix_cycles=val_min_prefix,
+            random_state=seed,
+        )
+    elif val_strategy == "last_cycle":
+        valid_df_eval = valid_df_full.copy()
+        valid_cuts = pd.DataFrame()
+    else:
+        raise ValueError(f"Unsupported val_strategy={val_strategy}")
 
     model = train_hist_gbr(X_train, y_train, model_cfg)
-    pred_valid_all = predict(model, X_valid)
-    metrics_all = {
-        "rmse": rmse(y_valid.to_numpy(), pred_valid_all),
-        "mae": mae(y_valid.to_numpy(), pred_valid_all),
-        "phm_score": phm_score(y_valid.to_numpy(), pred_valid_all),
+
+    X_valid_eval = build_features(valid_df_eval)
+    eval_idx = valid_df_eval.groupby("unit")["cycle"].idxmax().sort_values().to_numpy()
+    y_valid_eval = valid_df_eval.loc[eval_idx, "rul"].to_numpy(dtype=np.float32)
+    pred_valid_eval = predict(model, X_valid_eval.loc[eval_idx, feature_columns()])
+    metrics_primary = {
+        "rmse": rmse(y_valid_eval, pred_valid_eval),
+        "mae": mae(y_valid_eval, pred_valid_eval),
+        "phm_score": phm_score(y_valid_eval, pred_valid_eval),
     }
 
-    last_idx = valid_df.groupby("unit")["cycle"].idxmax().to_numpy()
-    y_valid_last = valid_df.loc[last_idx, "rul"].to_numpy(dtype=np.float32)
-    pred_valid_last = pred_valid_all[last_idx]
-    metrics_last = {
-        "rmse": rmse(y_valid_last, pred_valid_last),
-        "mae": mae(y_valid_last, pred_valid_last),
-        "phm_score": phm_score(y_valid_last, pred_valid_last),
+    X_valid_full = build_features(valid_df_full)
+    full_idx = valid_df_full.groupby("unit")["cycle"].idxmax().sort_values().to_numpy()
+    y_valid_full_last = valid_df_full.loc[full_idx, "rul"].to_numpy(dtype=np.float32)
+    pred_valid_full_last = predict(model, X_valid_full.loc[full_idx, feature_columns()])
+    metrics_full_last = {
+        "rmse": rmse(y_valid_full_last, pred_valid_full_last),
+        "mae": mae(y_valid_full_last, pred_valid_full_last),
+        "phm_score": phm_score(y_valid_full_last, pred_valid_full_last),
     }
-    metrics_primary = metrics_last if val_last_cycle_only else metrics_all
 
     model_path = model_dir / "model.joblib"
     meta_path = model_dir / "metadata.json"
@@ -136,12 +148,12 @@ def main() -> None:
             "max_rul": max_rul,
             "feature_columns": feature_columns(),
             "train_rows": int(len(train_df)),
-            "valid_rows": int(len(valid_df)),
+            "valid_rows": int(len(valid_df_full)),
+            "valid_eval_rows": int(len(valid_df_eval)),
             "train_units": int(len(train_units)),
             "valid_units": int(len(val_units)),
             "metrics_valid": metrics_primary,
-            "metrics_valid_last_cycle": metrics_last,
-            "metrics_valid_all_cycles": metrics_all,
+            "metrics_valid_full_last_cycle": metrics_full_last,
             "params": {
                 "max_iter": model_cfg.max_iter,
                 "learning_rate": model_cfg.learning_rate,
@@ -150,13 +162,15 @@ def main() -> None:
                 "l2_regularization": model_cfg.l2_regularization,
                 "seed": seed,
                 "val_fraction": val_fraction,
-                "val_last_cycle_only": val_last_cycle_only,
+                "val_strategy": val_strategy,
+                "val_min_prefix": val_min_prefix,
             },
+            "validation_cuts": valid_cuts.to_dict(orient="records") if len(valid_cuts) else [],
         },
     )
 
     print(f"Model directory: {model_dir}")
-    print(f"Validation mode: {'last_cycle' if val_last_cycle_only else 'all_cycles'}")
+    print(f"Validation strategy: {val_strategy}")
     print(f"Validation RMSE: {metrics_primary['rmse']:.4f}")
     print(f"Validation MAE: {metrics_primary['mae']:.4f}")
     print(f"Validation PHM score: {metrics_primary['phm_score']:.4f}")

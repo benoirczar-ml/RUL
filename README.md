@@ -39,7 +39,7 @@ python -m pip install -r requirements.txt
 ```bash
 python train.py
 ```
-Domyslnie walidacja jest liczona na ostatnim cyklu dla kazdej jednostki (`val_last_cycle_only=true`), zeby odpowiadala celowi testowemu C-MAPSS.
+Domyslnie walidacja jest pseudo-testowa (`val_strategy=truncation`): kazda jednostka walidacyjna jest obcinana przed awaria, a metryki liczone sa na punkcie odciecia.
 
 Przyklad nadpisania parametrow:
 ```bash
@@ -50,7 +50,7 @@ python train.py --fd FD002 --max-rul 130 --max-iter 500
 ```bash
 python train_sequence.py
 ```
-Domyslnie early stopping i metryki walidacyjne sa liczone na ostatnim cyklu (`val_last_cycle_only=true`).
+Domyslnie early stopping i metryki sa liczone na walidacji pseudo-testowej (`val_strategy=truncation`).
 
 Szybki smoke:
 ```bash
@@ -90,6 +90,14 @@ python tune_lstm.py --config config/tune_lstm.json --max-trials 6
 ```
 Wyniki zapisywane sa do `outputs/tuning/` (ranking per FD + plik zbiorczy).
 Aktualny przebieg: `outputs/tuning_v1/`.
+Po wdrozeniu walidacji `truncation`:
+- przebieg: `outputs/tuning_v2_trunc/`
+- porownanie najlepszych triali (wybor po walidacji) vs baseline:
+  - FD001: 40.98 vs 86.30 (RMSE)
+  - FD002: 54.01 vs 98.46 (RMSE)
+  - FD003: 42.32 vs 84.02 (RMSE)
+  - FD004: 54.57 vs 103.20 (RMSE)
+  - tabela: `outputs/tuning_v2_trunc/selected_vs_hist_baseline.csv`
 
 ## Status po 2 modelach (aktualny etap)
 - Sprawdzone modele:
@@ -105,7 +113,8 @@ Aktualny przebieg: `outputs/tuning_v1/`.
   - FD003: LSTM RMSE `60.94` vs HistGBR `84.02`
   - FD004: LSTM RMSE `99.28` vs HistGBR `103.20`
   - Wynik: LSTM lepszy na wszystkich 4 zbiorach.
-  - Uwaga metodologiczna: tuning pokazal, ze `best_by_val` i `best_by_test` czesto sie rozjezdzaja, wiec kolejny krok to walidacja jeszcze bardziej zblizona do testu (symulacja obcietych trajektorii).
+- Uwaga metodologiczna: tuning pokazal, ze `best_by_val` i `best_by_test` czesto sie rozjezdzaja, wiec kolejny krok to walidacja jeszcze bardziej zblizona do testu (symulacja obcietych trajektorii).
+  - (wdrozone) walidacja pseudo-testowa oparta o obciete trajektorie (`truncation`).
 
 ## Testy
 ```bash
