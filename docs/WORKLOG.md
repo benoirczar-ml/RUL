@@ -82,3 +82,9 @@
   - FD003: 42.32 vs 84.02 (RMSE)
   - FD004: 54.57 vs 103.20 (RMSE)
 - Wniosek: po urealnieniu walidacji i tuningu LSTM jest wyraznie lepszy od baseline 4/4.
+
+## 2026-03-06 - Oznaczenie statusu biznesowego
+- Wyniki oznaczono jako:
+  - mocny etap PoC / portfolio (do pokazywania rekruterom),
+  - nie finalny system produkcyjny dla lotnictwa.
+- Taka adnotacja zostala dopisana w `README.md` w sekcji "Jak to komunikowac".

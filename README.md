@@ -116,6 +116,11 @@ Po wdrozeniu walidacji `truncation`:
 - Uwaga metodologiczna: tuning pokazal, ze `best_by_val` i `best_by_test` czesto sie rozjezdzaja, wiec kolejny krok to walidacja jeszcze bardziej zblizona do testu (symulacja obcietych trajektorii).
   - (wdrozone) walidacja pseudo-testowa oparta o obciete trajektorie (`truncation`).
 
+## Jak to komunikowac
+- Projekt mozna bezpiecznie pokazywac rekruterom i zespolom ML jako mocny PoC end-to-end.
+- Nie nalezy opisywac tego etapu jako gotowy system produkcyjny dla lotnictwa.
+- Wlasciwa narracja: wysoka poprawa modelowa + poprawna metodologia + kolejne kroki do hardeningu.
+
 ## Testy
 ```bash
 python -m pytest -q
