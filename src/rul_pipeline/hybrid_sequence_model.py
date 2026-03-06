@@ -40,6 +40,10 @@ class ConvAttentionLSTMConfig:
     use_amp: bool = True
     enable_tf32: bool = True
     cudnn_benchmark: bool = True
+    use_torch_compile: bool = False
+    compile_mode: str = "reduce-overhead"
+    compile_backend: str = "inductor"
+    compile_fullgraph: bool = False
     log_every_epoch: bool = True
 
 
@@ -165,6 +169,34 @@ def _configure_gpu_runtime(cfg: ConvAttentionLSTMConfig, resolved_device: str) -
             pass
     if cfg.cudnn_benchmark:
         torch.backends.cudnn.benchmark = True
+
+
+def _unwrap_model(model: nn.Module) -> nn.Module:
+    base = model
+    if hasattr(base, "_orig_mod"):
+        base = getattr(base, "_orig_mod")
+    if hasattr(base, "module"):
+        base = getattr(base, "module")
+    return base
+
+
+def _maybe_compile_model(model: nn.Module, cfg: ConvAttentionLSTMConfig) -> nn.Module:
+    if not cfg.use_torch_compile:
+        return model
+    compile_fn = getattr(torch, "compile", None)
+    if compile_fn is None:
+        print("warning: torch.compile unavailable, running without compile.", flush=True)
+        return model
+    try:
+        return compile_fn(
+            model,
+            mode=cfg.compile_mode,
+            backend=cfg.compile_backend,
+            fullgraph=cfg.compile_fullgraph,
+        )
+    except Exception as ex:
+        print(f"warning: torch.compile failed ({ex}), running without compile.", flush=True)
+        return model
 
 
 def _asymmetric_huber_loss(
@@ -296,6 +328,7 @@ def train_conv_attention_lstm_regressor(
         dropout=cfg.dropout,
         num_fd_heads=cfg.num_fd_heads,
     ).to(resolved_device)
+    model = _maybe_compile_model(model, cfg)
 
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -413,12 +446,13 @@ def predict_conv_attention_lstm(
     fd_idx: int | np.ndarray | None = None,
 ) -> np.ndarray:
     model.eval()
+    base_model = _unwrap_model(model)
     use_cuda = _is_cuda_device(device)
     copy_non_blocking = bool(non_blocking and use_cuda)
     use_pin_memory = bool(use_cuda if pin_memory is None else (pin_memory and use_cuda))
 
     x_t = torch.from_numpy(x).float()
-    if model.num_fd_heads > 1:
+    if getattr(base_model, "num_fd_heads", 1) > 1:
         if fd_idx is None:
             raise ValueError("fd_idx is required for predict_conv_attention_lstm when num_fd_heads > 1.")
         if isinstance(fd_idx, np.ndarray):
@@ -449,17 +483,18 @@ def predict_conv_attention_lstm(
 
 
 def save_conv_attention_lstm_checkpoint(model: ConvAttentionLSTMRegressor, path: str) -> None:
+    base_model = _unwrap_model(model)
     payload = {
-        "state_dict": model.state_dict(),
+        "state_dict": base_model.state_dict(),
         "arch": {
-            "input_size": model.input_size,
-            "conv_channels": model.conv_channels,
-            "kernel_size": model.kernel_size,
-            "attention_heads": model.attention_heads,
-            "hidden_size": model.hidden_size,
-            "num_layers": model.num_layers,
-            "dropout": model.dropout,
-            "num_fd_heads": model.num_fd_heads,
+            "input_size": base_model.input_size,
+            "conv_channels": base_model.conv_channels,
+            "kernel_size": base_model.kernel_size,
+            "attention_heads": base_model.attention_heads,
+            "hidden_size": base_model.hidden_size,
+            "num_layers": base_model.num_layers,
+            "dropout": base_model.dropout,
+            "num_fd_heads": base_model.num_fd_heads,
         },
     }
     torch.save(payload, path)

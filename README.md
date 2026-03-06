@@ -69,6 +69,10 @@ python train_sequence.py \
   --cudnn-benchmark
 ```
 Epokowe logi (1 linia na epoke): `--log-every-epoch` (wylaczenie: `--no-log-every-epoch`)
+Opcjonalnie mozna wlaczyc kompilacje grafu:
+```bash
+python train_hybrid_sequence.py --fd FD001 --device cuda --use-torch-compile
+```
 
 Szybki smoke/benchmark sciezki GPU transfer + AMP/TF32/cuDNN:
 ```bash
@@ -118,6 +122,10 @@ python train_hybrid_multifd.py \
   --sample-step 1 \
   --device cuda \
   --model-dir models/caelstm_multifd_v1
+```
+Wariant z kompilacja:
+```bash
+python train_hybrid_multifd.py --device cuda --use-torch-compile --compile-mode reduce-overhead
 ```
 
 ## Predykcja testu

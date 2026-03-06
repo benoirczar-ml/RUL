@@ -144,6 +144,20 @@ def parse_args() -> argparse.Namespace:
         help="Enable cuDNN benchmark autotuning.",
     )
     parser.add_argument(
+        "--use-torch-compile",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable torch.compile acceleration.",
+    )
+    parser.add_argument("--compile-mode", default=None, help="torch.compile mode, e.g. reduce-overhead/max-autotune.")
+    parser.add_argument("--compile-backend", default=None, help="torch.compile backend, e.g. inductor.")
+    parser.add_argument(
+        "--compile-fullgraph",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable fullgraph mode in torch.compile.",
+    )
+    parser.add_argument(
         "--log-every-epoch",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -345,6 +359,10 @@ def main() -> None:
         use_amp=bool(_pick(args.use_amp, cfg_data, "use_amp", True)),
         enable_tf32=bool(_pick(args.enable_tf32, cfg_data, "enable_tf32", True)),
         cudnn_benchmark=bool(_pick(args.cudnn_benchmark, cfg_data, "cudnn_benchmark", True)),
+        use_torch_compile=bool(_pick(args.use_torch_compile, cfg_data, "use_torch_compile", False)),
+        compile_mode=str(_pick(args.compile_mode, cfg_data, "compile_mode", "reduce-overhead")),
+        compile_backend=str(_pick(args.compile_backend, cfg_data, "compile_backend", "inductor")),
+        compile_fullgraph=bool(_pick(args.compile_fullgraph, cfg_data, "compile_fullgraph", False)),
         log_every_epoch=bool(_pick(args.log_every_epoch, cfg_data, "log_every_epoch", True)),
     )
 
@@ -459,6 +477,10 @@ def main() -> None:
                 "use_amp": model_cfg.use_amp,
                 "enable_tf32": model_cfg.enable_tf32,
                 "cudnn_benchmark": model_cfg.cudnn_benchmark,
+                "use_torch_compile": model_cfg.use_torch_compile,
+                "compile_mode": model_cfg.compile_mode,
+                "compile_backend": model_cfg.compile_backend,
+                "compile_fullgraph": model_cfg.compile_fullgraph,
                 "log_every_epoch": model_cfg.log_every_epoch,
                 "seed": seed,
                 "val_fraction": val_fraction,

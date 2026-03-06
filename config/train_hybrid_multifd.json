@@ -37,5 +37,9 @@
   "use_amp": true,
   "enable_tf32": true,
   "cudnn_benchmark": true,
+  "use_torch_compile": false,
+  "compile_mode": "reduce-overhead",
+  "compile_backend": "inductor",
+  "compile_fullgraph": false,
   "log_every_epoch": true
 }
