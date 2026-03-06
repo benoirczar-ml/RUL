@@ -88,3 +88,17 @@
   - mocny etap PoC / portfolio (do pokazywania rekruterom),
   - nie finalny system produkcyjny dla lotnictwa.
 - Taka adnotacja zostala dopisana w `README.md` w sekcji "Jak to komunikowac".
+
+## 2026-03-06 - Produkcyjne elementy: gating + stabilnosc protokolu
+- Dodano inferencje cycle-level:
+  - `predict_all_cycles`, `predict_on_dataframe` w `src/rul_pipeline/inference.py`.
+- Dodano warstwe operacyjna:
+  - `src/rul_pipeline/operations.py` (alerty + metryki operacyjne).
+  - `evaluate_operational_policy.py` (grid policy i ranking).
+- Dodano walidacje stabilnosci:
+  - `validate_truncation_protocol.py` (multi-seed truncation report).
+- Dodano testy:
+  - `tests/test_operations.py`.
+- Smoke wyniki (FD001, model `models/tuning_v2_trunc/FD001/trial_004`):
+  - best policy: trigger=60, consecutive=2, cooldown=10
+  - recall=1.00, false_alert_rate=0.1315, median lead time=98 cykli.

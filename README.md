@@ -99,6 +99,40 @@ Po wdrozeniu walidacji `truncation`:
   - FD004: 54.57 vs 103.20 (RMSE)
   - tabela: `outputs/tuning_v2_trunc/selected_vs_hist_baseline.csv`
 
+## Operacyjna polityka alarmow (gating)
+Symulacja alertowania na predykcjach cycle-level:
+```bash
+python evaluate_operational_policy.py \
+  --model-dir models/tuning_v2_trunc/FD001/trial_004 \
+  --fd FD001 \
+  --split train \
+  --trigger-ruls 60,80,100,120,140 \
+  --consecutives 1,2 \
+  --cooldowns 0,5,10 \
+  --min-lead 5 \
+  --max-lead 120 \
+  --output-csv outputs/ops_policy_fd001_v2.csv \
+  --output-json outputs/ops_policy_fd001_v2.json
+```
+
+Przyklad najlepszego wariantu (FD001 train, model `trial_004`):
+- policy: `trigger_rul=60`, `consecutive=2`, `cooldown=10`
+- recall: `1.00`
+- false alerts: `129`
+- false alert rate: `0.1315`
+- median lead time: `98` cykli
+
+## Stabilnosc protokolu walidacji truncation
+```bash
+python validate_truncation_protocol.py \
+  --model-dir models/tuning_v2_trunc/FD001/trial_004 \
+  --fd FD001 \
+  --cut-seeds 11,22,33,44,55 \
+  --output-csv outputs/trunc_stability_fd001.csv \
+  --output-json outputs/trunc_stability_fd001.json
+```
+To raportuje rozrzut metryk po wielu seedach obciecia trajektorii.
+
 ## Status po 2 modelach (aktualny etap)
 - Sprawdzone modele:
   - `HistGradientBoostingRegressor` (baseline)
