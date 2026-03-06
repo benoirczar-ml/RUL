@@ -118,3 +118,19 @@
   - mniejsza liczba alertow / false alerts vs polityka bez trend gate.
 - Dodatkowa notatka:
   - `NaN` w kolumnie `exit_rul` oznacza `None` (brak hysteresis), bez wpływu na obliczenia.
+
+## 2026-03-06 - Deployment policy selection (constraint-based)
+- Dodano selektor gotowych polityk pod ograniczenia biznesowe:
+  - `select_deployment_policies.py`
+- Wejscie:
+  - gridy z `outputs/ops_calibration_v2/*_policy_grid.csv`
+- Wyjscie:
+  - `outputs/deployment_policies/deployment_policy_selection.csv`
+  - `outputs/deployment_policies/policy_config_FD*.json`
+- Przebieg z constraintami:
+  - `min_recall=0.98`
+  - `max_false_alert_rate=0.30`
+  - `min_median_lead=60`
+- Wynik:
+  - `FD001` spelnia constrainty,
+  - `FD002/FD003/FD004` jeszcze nie spelniaja false alert rate.

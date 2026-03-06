@@ -153,6 +153,25 @@ Kalibracja V2 (4xFD, best LSTM per FD):
 - dla wszystkich FD utrzymany `recall=1.0`,
 - trend gate (`trend_window=5`) obniza laczna liczbe alertow i false alerts vs wersja bez trendu.
 
+## Selection pod constrainty biznesowe
+Automatyczny wybór polityki pod targety (np. `recall>=0.98`, `false_alert_rate<=0.30`, `median_lead>=60`):
+```bash
+python select_deployment_policies.py \
+  --policy-dir outputs/ops_calibration_v2 \
+  --min-recall 0.98 \
+  --max-false-alert-rate 0.30 \
+  --min-median-lead 60 \
+  --output-dir outputs/deployment_policies
+```
+
+Artefakty:
+- `outputs/deployment_policies/deployment_policy_selection.csv`
+- `outputs/deployment_policies/policy_config_FD001.json` ... `policy_config_FD004.json`
+
+Wynik dla obecnych gridow:
+- `FD001`: spelnia constrainty,
+- `FD002`, `FD003`, `FD004`: jeszcze nie spelniaja progu false alert rate.
+
 ## Stabilnosc protokolu walidacji truncation
 ```bash
 python validate_truncation_protocol.py \
