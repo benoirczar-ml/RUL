@@ -16,5 +16,11 @@
   "epochs": 12,
   "batch_size": 256,
   "patience": 3,
-  "device": "auto"
+  "device": "auto",
+  "num_workers": 0,
+  "pin_memory": true,
+  "non_blocking": true,
+  "use_amp": true,
+  "enable_tf32": true,
+  "cudnn_benchmark": true
 }

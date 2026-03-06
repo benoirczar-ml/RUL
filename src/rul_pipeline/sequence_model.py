@@ -20,6 +20,12 @@ class LSTMConfig:
     batch_size: int = 256
     patience: int = 3
     random_state: int = 42
+    num_workers: int = 0
+    pin_memory: bool = True
+    non_blocking: bool = True
+    use_amp: bool = True
+    enable_tf32: bool = True
+    cudnn_benchmark: bool = True
 
 
 class LSTMRegressor(nn.Module):
@@ -56,6 +62,23 @@ def resolve_device(device: str) -> str:
     return device
 
 
+def _is_cuda_device(device: str) -> bool:
+    return device.startswith("cuda")
+
+
+def _configure_gpu_runtime(cfg: LSTMConfig, resolved_device: str) -> None:
+    if not _is_cuda_device(resolved_device):
+        return
+    if cfg.enable_tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        try:
+            torch.set_float32_matmul_precision("high")
+        except RuntimeError:
+            pass
+    if cfg.cudnn_benchmark:
+        torch.backends.cudnn.benchmark = True
+
+
 def train_lstm_regressor(
     x_train: np.ndarray,
     y_train: np.ndarray,
@@ -68,6 +91,8 @@ def train_lstm_regressor(
     np.random.seed(cfg.random_state)
 
     resolved_device = resolve_device(device)
+    use_cuda = _is_cuda_device(resolved_device)
+    _configure_gpu_runtime(cfg, resolved_device)
     model = LSTMRegressor(
         input_size=cfg.input_size,
         hidden_size=cfg.hidden_size,
@@ -86,15 +111,25 @@ def train_lstm_regressor(
         torch.from_numpy(x_train).float(),
         torch.from_numpy(y_train).float(),
     )
+    loader_kwargs = {
+        "batch_size": cfg.batch_size,
+        "shuffle": True,
+        "drop_last": False,
+        "num_workers": max(0, int(cfg.num_workers)),
+        "pin_memory": bool(cfg.pin_memory and use_cuda),
+    }
+    if loader_kwargs["num_workers"] > 0:
+        loader_kwargs["persistent_workers"] = True
     train_loader = DataLoader(
         train_ds,
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        drop_last=False,
+        **loader_kwargs,
     )
 
-    x_valid_t = torch.from_numpy(x_valid).float().to(resolved_device)
+    copy_non_blocking = bool(cfg.non_blocking and use_cuda)
+    x_valid_t = torch.from_numpy(x_valid).float().to(resolved_device, non_blocking=copy_non_blocking)
     y_valid_np = y_valid.astype(np.float32)
+    use_amp = bool(cfg.use_amp and use_cuda)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     best_state = None
     best_rmse = float("inf")
@@ -105,14 +140,20 @@ def train_lstm_regressor(
         model.train()
         train_losses = []
         for xb, yb in train_loader:
-            xb = xb.to(resolved_device)
-            yb = yb.to(resolved_device)
+            xb = xb.to(resolved_device, non_blocking=copy_non_blocking)
+            yb = yb.to(resolved_device, non_blocking=copy_non_blocking)
 
             optimizer.zero_grad(set_to_none=True)
-            pred = model(xb)
-            loss = criterion(pred, yb)
-            loss.backward()
-            optimizer.step()
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+                pred = model(xb)
+                loss = criterion(pred, yb)
+            if use_amp:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
             train_losses.append(float(loss.item()))
 
         model.eval()
@@ -146,16 +187,26 @@ def train_lstm_regressor(
     return model, history, resolved_device
 
 
-def predict_lstm(model: LSTMRegressor, x: np.ndarray, batch_size: int, device: str) -> np.ndarray:
+def predict_lstm(
+    model: LSTMRegressor,
+    x: np.ndarray,
+    batch_size: int,
+    device: str,
+    non_blocking: bool = False,
+    pin_memory: bool | None = None,
+) -> np.ndarray:
     model.eval()
+    use_cuda = _is_cuda_device(device)
+    copy_non_blocking = bool(non_blocking and use_cuda)
+    use_pin_memory = bool(use_cuda if pin_memory is None else (pin_memory and use_cuda))
     x_t = torch.from_numpy(x).float()
     ds = TensorDataset(x_t)
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, drop_last=False)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, drop_last=False, pin_memory=use_pin_memory)
 
     preds = []
     with torch.no_grad():
         for (xb,) in loader:
-            xb = xb.to(device)
+            xb = xb.to(device, non_blocking=copy_non_blocking)
             preds.append(model(xb).detach().cpu().numpy())
     return np.concatenate(preds, axis=0)
 

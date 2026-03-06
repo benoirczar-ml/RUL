@@ -57,6 +57,23 @@ Szybki smoke:
 python train_sequence.py --fd FD001 --epochs 3 --sample-step 2 --model-dir models/lstm_smoke_fd001
 ```
 
+GPU runtime toggles (dla CUDA):
+```bash
+python train_sequence.py \
+  --fd FD001 \
+  --device cuda \
+  --pin-memory \
+  --non-blocking \
+  --use-amp \
+  --enable-tf32 \
+  --cudnn-benchmark
+```
+
+Szybki smoke/benchmark sciezki GPU transfer + AMP/TF32/cuDNN:
+```bash
+python scripts/gpu_runtime_smoke.py --device auto --output-json outputs/gpu_runtime_smoke.json
+```
+
 ## Predykcja testu
 1. Wybierz katalog modelu, np. `models/hist_gbr_FD001_YYYYMMDD_HHMMSS`
 ```bash

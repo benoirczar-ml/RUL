@@ -51,6 +51,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=None, help="Batch size.")
     parser.add_argument("--patience", type=int, default=None, help="Early stopping patience.")
     parser.add_argument("--device", default=None, help="auto/cpu/cuda.")
+    parser.add_argument("--num-workers", type=int, default=None, help="DataLoader workers.")
+    parser.add_argument(
+        "--pin-memory",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable pinned-memory DataLoader buffers on CUDA.",
+    )
+    parser.add_argument(
+        "--non-blocking",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable non-blocking CPU->GPU copies.",
+    )
+    parser.add_argument(
+        "--use-amp",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable automatic mixed precision on CUDA.",
+    )
+    parser.add_argument(
+        "--enable-tf32",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable TF32 matmul on CUDA.",
+    )
+    parser.add_argument(
+        "--cudnn-benchmark",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable cuDNN benchmark autotuning.",
+    )
     parser.add_argument("--val-strategy", choices=["truncation", "last_cycle"], default=None, help="Validation strategy.")
     parser.add_argument("--val-min-prefix", type=int, default=None, help="Min observed cycles in truncation validation.")
     parser.add_argument("--model-dir", default=None, help="Output model directory.")
@@ -159,6 +190,12 @@ def main() -> None:
         batch_size=int(_pick(args.batch_size, cfg_data, "batch_size", 256)),
         patience=int(_pick(args.patience, cfg_data, "patience", 3)),
         random_state=seed,
+        num_workers=int(_pick(args.num_workers, cfg_data, "num_workers", 0)),
+        pin_memory=bool(_pick(args.pin_memory, cfg_data, "pin_memory", True)),
+        non_blocking=bool(_pick(args.non_blocking, cfg_data, "non_blocking", True)),
+        use_amp=bool(_pick(args.use_amp, cfg_data, "use_amp", True)),
+        enable_tf32=bool(_pick(args.enable_tf32, cfg_data, "enable_tf32", True)),
+        cudnn_benchmark=bool(_pick(args.cudnn_benchmark, cfg_data, "cudnn_benchmark", True)),
     )
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -174,9 +211,21 @@ def main() -> None:
         cfg=model_cfg,
         device=device,
     )
-    pred_valid_eval = predict_lstm(model, x_valid_eval_last_seq, batch_size=model_cfg.batch_size, device=resolved_device)
+    pred_valid_eval = predict_lstm(
+        model,
+        x_valid_eval_last_seq,
+        batch_size=model_cfg.batch_size,
+        device=resolved_device,
+        non_blocking=model_cfg.non_blocking,
+        pin_memory=model_cfg.pin_memory,
+    )
     pred_valid_full_last = predict_lstm(
-        model, x_valid_full_last_seq, batch_size=model_cfg.batch_size, device=resolved_device
+        model,
+        x_valid_full_last_seq,
+        batch_size=model_cfg.batch_size,
+        device=resolved_device,
+        non_blocking=model_cfg.non_blocking,
+        pin_memory=model_cfg.pin_memory,
     )
     metrics_primary = {
         "rmse": rmse(y_valid_eval_last_seq, pred_valid_eval),
@@ -221,6 +270,12 @@ def main() -> None:
                 "epochs": model_cfg.epochs,
                 "batch_size": model_cfg.batch_size,
                 "patience": model_cfg.patience,
+                "num_workers": model_cfg.num_workers,
+                "pin_memory": model_cfg.pin_memory,
+                "non_blocking": model_cfg.non_blocking,
+                "use_amp": model_cfg.use_amp,
+                "enable_tf32": model_cfg.enable_tf32,
+                "cudnn_benchmark": model_cfg.cudnn_benchmark,
                 "seed": seed,
                 "val_fraction": val_fraction,
                 "sample_step": sample_step,
