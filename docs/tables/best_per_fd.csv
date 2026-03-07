@@ -1,0 +1,2 @@
+fd001_rmse,fd002_rmse,fd003_rmse,fd004_rmse,macro_rmse,worst_fd_rmse,artifact
+10.715711795319548,22.39067874154853,11.601352104131497,23.469306189736557,17.04426220768403,23.469306189736557,outputs/hierarchical_ensemble_cross_ensglobal_newfd13_fd24v3full_t2s43_w101/hierarchical_ensemble_metrics.csv

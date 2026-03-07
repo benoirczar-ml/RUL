@@ -1,18 +1,9 @@
-# RUL Project - Technical Runbook (In Progress)
+# README_2 - Technical Appendix & Engineering Notes
 
-Technical appendix to `README.md`.
-Current status: iterative development, target `<=12.5` not reached yet.
+This document is the technical counterpart to `README.md`.
+It includes exact artifacts, iteration logic, and practical constraints.
 
-## 1) Problem Setup
-- Dataset: NASA C-MAPSS (`FD001..FD004`)
-- Task: Remaining Useful Life regression
-- Evaluation point: last cycle per test unit
-- Primary KPI: macro RMSE over `FD001..FD004`
-- Reliability KPIs:
-  - worst-FD RMSE
-  - tail RMSE / miss-rate in low-RUL region
-
-## 2) Current Best Result
+## 1) Best Known Checkpoint (Global)
 Artifact:
 - `outputs/hierarchical_ensemble_cross_ensglobal_newfd13_fd24v3full_t2s43_w101/hierarchical_ensemble_metrics.csv`
 
@@ -20,113 +11,99 @@ Metrics:
 - `macro_rmse = 17.0443`
 - `worst_fd_rmse = 23.4693`
 
-Per-FD RMSE:
-- `FD001=10.7157`
-- `FD002=22.3907`
-- `FD003=11.6014`
-- `FD004=23.4693`
+Per-FD:
+- `FD001 = 10.7157`
+- `FD002 = 22.3907`
+- `FD003 = 11.6014`
+- `FD004 = 23.4693`
 
-## 3) Current Best System Architecture
-1. Global branch:
- - 5-seed median ensemble from `trial_003`
- - source: `models/seed_ensemble_global_trial003_loop2/trial_003_seed42..46`
-2. FD13 specialist (`FD001/FD003`):
- - `models/tuning_fd13_stage_allpoints_multiseed_loop1/trial_001/seed_42`
-3. FD24 specialist (`FD002/FD004`):
- - `models/tuning_fd24_stage_allpoints_multiseed_v3_fullrerun/trial_002/seed_43`
-4. Per-FD blend weights:
- - `FD001=0.00`
- - `FD002=0.10`
- - `FD003=0.00`
- - `FD004=0.43`
+## 2) Main System Topology
+- Global branch: 5-seed ensemble (`trial_003`, seeds `42..46`)
+- FD13 specialist:
+  - `models/tuning_fd13_stage_allpoints_multiseed_loop1/trial_001/seed_42`
+- FD24 specialist:
+  - `models/tuning_fd24_stage_allpoints_multiseed_v3_fullrerun/trial_002/seed_43`
+- Per-FD blend weights (best run):
+  - `FD001=0.00`
+  - `FD002=0.10`
+  - `FD003=0.00`
+  - `FD004=0.43`
 
-## 4) Latest Improvement Loop (What Was Executed)
-Workflow:
-1. FD24 rerun with long windows (`seq_len` up to 120) and stronger late/tail penalties.
-2. Ranking with stability-aware score:
- - `val_rank_score = mean + 0.7 * std + 1.5 * worst_fd`
-3. Cross-ensemble on top FD24 checkpoints.
-4. Dense blend search (`weight-grid-size=101`).
+## 3) Progression Snapshot
+Source table:
+- `docs/tables/summary_results.csv`
 
-Outcome:
-- Previous best: `17.1132`
-- New best: `17.0443`
-- Delta: `-0.0689` macro RMSE
+Key milestones:
+- baseline: `46.2155`
+- single model best: `20.8845`
+- early hierarchical: `17.2135`
+- current best hierarchical: `17.0443`
+- variance meta-stacker experiment: `17.5447`
 
-Comparison artifact:
-- `outputs/comparison_fd24v3full_cross.csv`
+Interpretation:
+- Most gain came from architecture/pipeline structuring + specialists, not one-off model swaps.
+- Variance-aware meta-stacker (loop1) improved validation shape but overfit on full test.
 
-## 5) Full Trajectory From LSTM (What Worked vs What Did Not)
-Recommended public framing:
-- `README.md`: only key milestones and current best.
-- `README_2.md` + `docs/WORKLOG.md`: full path including dead branches.
+## 4) FD004 v4 Loop Status
+Artifact:
+- `outputs/tuning_fd004_v4_tail_longwindow_multiseed_loop1/hybrid_multifd_multiseed_agg.csv`
 
-Milestone path:
-1. Early LSTM restart baseline:
- - global level around `~46` macro RMSE (historical start point)
-2. Architecture exploration phase (no stable global breakthrough):
- - TCN / Transformer / Mamba / MoE / regime variants
- - local wins on selected FD, but no robust macro improvement
-3. Methodology and feature pipeline fixes:
- - large jump to `~21` macro RMSE
-4. Stability-first selection and specialist blending:
- - step to `17.xx`
-5. Latest FD24-focused loop:
- - new best `17.0443`
+Best by rank (`mean + 0.7*std + 1.5*worst_fd`):
+- `trial_007`
+- `val_selection_mean = 15.2900`
+- `val_selection_std = 0.2387`
 
-Dead branches policy:
-- Keep in repository history and `WORKLOG` (important engineering evidence).
-- Do not overload the recruiter-facing main page with low-signal branch details.
+Cross-ensemble tests with FD004 override:
+- `trial_007/seed_42`: `macro 17.1083`
+- `trial_007/seed_43`: `macro 17.0905`
+- `trial_007/seed_44`: `macro 17.1592`
 
-## 6) Repro Commands (Latest Best Path)
+All were worse than `17.0443`.
 
-### 5.1 FD24 multiseed rerun
-```bash
-python scripts/tune_hybrid_multifd_multiseed.py \
-  --config config/tune_hybrid_multifd_fd24_stage_allpoints_v3.json \
-  --seeds 42,43,44 \
-  --max-trials 9 \
-  --eval-test-top-k 3 \
-  --std-penalty 0.7 \
-  --worst-fd-penalty 1.5 \
-  --shuffle-seed 20260307 \
-  --output-dir outputs/tuning_fd24_stage_allpoints_multiseed_v3_fullrerun \
-  --models-root models/tuning_fd24_stage_allpoints_multiseed_v3_fullrerun
-```
+## 5) Deep Ensemble + Variance Meta-Stacker Loop (Latest)
+New script:
+- `scripts/meta_stacker_multifd_variance.py`
 
-### 5.2 Best cross-ensemble
-```bash
-python scripts/hierarchical_ensemble_multifd.py \
-  --global-model-dirs "models/seed_ensemble_global_trial003_loop2/trial_003_seed42,models/seed_ensemble_global_trial003_loop2/trial_003_seed43,models/seed_ensemble_global_trial003_loop2/trial_003_seed44,models/seed_ensemble_global_trial003_loop2/trial_003_seed45,models/seed_ensemble_global_trial003_loop2/trial_003_seed46" \
-  --fd13-model-dir models/tuning_fd13_stage_allpoints_multiseed_loop1/trial_001/seed_42 \
-  --fd24-model-dir models/tuning_fd24_stage_allpoints_multiseed_v3_fullrerun/trial_002/seed_43 \
-  --fds FD001,FD002,FD003,FD004 \
-  --weight-grid-size 101 \
-  --output-dir outputs/hierarchical_ensemble_cross_ensglobal_newfd13_fd24v3full_t2s43_w101 \
-  --device cuda
-```
+Output:
+- `outputs/meta_stacker_variance_loop1/meta_stacker_variance_metrics.csv`
+- `outputs/meta_stacker_variance_loop1/meta_stacker_variance_state.json`
 
-## 7) Runtime Constraints (WSL/CUDA)
-- Environment: WSL2 + RTX 4060 Laptop GPU
-- Memory-sensitive regime: heavy FD24 runs with `seq_len=120`
-- Stable config used in latest loop:
- - `.wslconfig`: `memory=22GB`, `swap=16GB`
-- Prior failure mode:
- - Linux OOM kill on Python process when memory envelope was too tight
+Result:
+- `macro = 17.5447`
+- `worst_fd = 23.4783`
 
-## 8) Key Files
-- Training:
- - `train_hybrid_multifd.py`
- - `scripts/tune_hybrid_multifd_multiseed.py`
-- Ensembling:
- - `scripts/seed_ensemble_multifd.py`
- - `scripts/hierarchical_ensemble_multifd.py`
-- Pipeline core:
- - `src/rul_pipeline/*`
-- Experiment history:
- - `docs/WORKLOG.md`
+Why not promoted:
+- worse macro than best hierarchical by `+0.5005`
+- worst-FD essentially unchanged
 
-## 9) Next Iteration
-- Complete remaining FD24 v3 trials (`004-009`) under current memory setup.
-- Re-rank + re-run cross-ensemble.
-- Target for next loop: push global RMSE from `17.04` toward `<=16.x`, primarily by reducing FD004 error.
+## 6) Visualization Assets
+Generated from:
+- `scripts/generate_readme_assets.py`
+
+Figures:
+- `docs/figures/rmse_progression.png`
+- `docs/figures/per_fd_comparison.png`
+- `docs/figures/fd004_pred_vs_true.png`
+- `docs/figures/fd004_error_hist.png`
+- `docs/figures/fd004_uncertainty_vs_error.png`
+
+Tables:
+- `docs/tables/summary_results.csv`
+- `docs/tables/best_per_fd.csv`
+- `docs/tables/ablation_lift_summary.csv`
+- `docs/tables/fd004_best_errors.csv`
+- `docs/tables/fd004_uncertainty_vs_error.csv`
+
+## 7) Known Bottlenecks
+- FD002 and FD004 still dominate the global macro.
+- FD004-only validation gains do not reliably transfer to full-system blend.
+- Additional model complexity near plateau often improves val but not test macro.
+
+## 8) What Could Still Move the Needle (Without Physics-Informed Block)
+1. FD002 v4 specialist loop (longer context + stronger tail/late penalties + strict multi-seed ranking).
+2. Better specialist routing / gating for FD24 split into FD002 vs FD004 at inference time.
+3. More conservative stacker with stronger fold-based validation and fallback-on-baseline per FD.
+
+## 9) Practical Stop Condition
+At this stage, expected gains are marginal relative to added complexity/runtime.
+Repository is left in a reproducible state with complete logs and visuals.
