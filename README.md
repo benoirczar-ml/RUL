@@ -1,5 +1,11 @@
 # Remaining Useful Life (NASA C-MAPSS)
 
+## Final Results (TL;DR)
+- **Macro RMSE:** `17.0443`
+- **Improvement vs baseline:** `46.2155 -> 17.0443` (`-63.1%`)
+- **Best per-FD RMSE:** `FD001=10.7157`, `FD002=22.3907`, `FD003=11.6014`, `FD004=23.4693`
+- **Current status:** interim goal `<25` achieved; final goal `<=12.5` still open (FD004 bottleneck)
+
 ## Story
 Ten projekt to historia zejscia z poziomu "dziala, ale za slabo" do poziomu realnego postepu inzynierskiego.
 
